@@ -32,6 +32,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/ComBudget "$APP/Contents/MacOS/ComBudget"
 cp Packaging/Info.plist "$APP/Contents/Info.plist"
 cp data/quota451.sqlite "$APP/Contents/Resources/quota451.sqlite"
+cp Packaging/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || codesign --force --sign - "$APP"
 
 echo "==> 产物"

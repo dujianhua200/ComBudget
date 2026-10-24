@@ -46,12 +46,16 @@ struct RootView: View {
         List(selection: routeBinding) {
             Section("工程") {
                 ForEach(app.projects) { p in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(p.name).font(.system(size: 12)).lineLimit(1)
-                        Text("\(p.category) · \(p.specialty)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                    Label {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(p.name).font(.system(size: 12)).lineLimit(1)
+                            Text("\(p.category) · \(p.specialty)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    } icon: {
+                        Image(systemName: "doc.text")
                     }
                     .tag(AppState.Route.project(p.id))
                     .contextMenu {

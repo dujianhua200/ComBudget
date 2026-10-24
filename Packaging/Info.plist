@@ -17,7 +17,11 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 dujianhua. 内置定额数据仅供内部参考检索。</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSApplicationCategoryType</key>
@@ -26,8 +30,6 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>NSSupportsAutomaticTermination</key>
-	<true/>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
