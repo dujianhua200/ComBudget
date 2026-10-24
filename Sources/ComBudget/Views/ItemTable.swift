@@ -142,6 +142,7 @@ struct ItemTable: NSViewRepresentable {
 
     // MARK: - Coordinator
 
+    @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
         var app: AppState
         weak var tableView: NSTableView?
