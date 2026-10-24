@@ -160,122 +160,7 @@ struct BudgetEditorView: View {
             if app.items.isEmpty {
                 emptyHint
             } else {
-                // 注意：TableColumnBuilder 单层最多 10 列，故用 TableColumnGroup 分组表头
-                Table(app.items, selection: $app.selectedItemID) {
-                    TableColumnGroup("定额") {
-                        TableColumn("序号") { item in
-                            Text("\(index(of: item) + 1)")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .width(38)
-
-                        TableColumn("编号") { item in
-                            Text(item.quotaCode)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.tint)
-                        }
-                        .width(78)
-
-                        TableColumn("名称") { item in
-                            Text(item.quotaName)
-                                .font(.system(size: 11))
-                                .lineLimit(1)
-                                .help(item.quotaName)
-                        }
-                        .width(min: 150, ideal: 230)
-
-                        TableColumn("单位") { item in
-                            Text(item.unit)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                        .width(46)
-                    }
-
-                    TableColumnGroup("工程量") {
-                        TableColumn("数量") { item in
-                            TextField("", value: Binding(
-                                get: { item.quantity },
-                                set: { v in app.apply({ $0.quantity = v }, to: item.id) }),
-                                      format: .number.precision(.fractionLength(0...4)))
-                                .textFieldStyle(.plain)
-                                .multilineTextAlignment(.trailing)
-                                .font(.system(size: 11, design: .rounded))
-                                .monospacedDigit()
-                        }
-                        .width(74)
-
-                        TableColumn("系数") { item in
-                            TextField("", value: Binding(
-                                get: { item.workdayCoeff },
-                                set: { v in app.apply({ $0.workdayCoeff = v }, to: item.id) }),
-                                      format: .number.precision(.fractionLength(0...3)))
-                                .textFieldStyle(.plain)
-                                .multilineTextAlignment(.trailing)
-                                .font(.system(size: 11, design: .rounded))
-                                .monospacedDigit()
-                        }
-                        .width(54)
-
-                        TableColumn("技工") { item in
-                            num(readonlyCost(item)?.techWorkdays, formatter: Fmt.workday)
-                        }
-                        .width(52)
-
-                        TableColumn("普工") { item in
-                            num(readonlyCost(item)?.laborWorkdays, formatter: Fmt.workday)
-                        }
-                        .width(52)
-                    }
-
-                    TableColumnGroup("费用（元）") {
-                        TableColumn("人工费") { item in
-                            num(readonlyCost(item)?.labor, formatter: Fmt.money)
-                        }
-                        .width(80)
-
-                        TableColumn("主材费") { item in
-                            num(readonlyCost(item)?.mainMaterial, formatter: Fmt.money)
-                        }
-                        .width(78)
-
-                        TableColumn("机械费") { item in
-                            num(readonlyCost(item)?.machine, formatter: Fmt.money)
-                        }
-                        .width(70)
-
-                        TableColumn("仪表费") { item in
-                            num(readonlyCost(item)?.instrument, formatter: Fmt.money)
-                        }
-                        .width(70)
-
-                        TableColumn("小计") { item in
-                            num(readonlyCost(item)?.direct, formatter: Fmt.money, bold: true)
-                        }
-                        .width(88)
-                    }
-
-                    TableColumn("备注") { item in
-                        Text(item.note)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help(item.note)
-                    }
-                    .width(min: 60, ideal: 110)
-                }
-                .tableStyle(.inset(alternatesRowBackgrounds: true))
-                .contextMenu(forSelectionType: ProjectItem.ID.self) { ids in
-                    Button("上移") { ids.forEach { app.moveItemUp(id: $0) } }
-                    Button("下移") { ids.forEach { app.moveItemDown(id: $0) } }
-                    Divider()
-                    Button("在属性面板中编辑") { app.selectedItemID = ids.first }
-                    Button("删除", role: .destructive) { ids.forEach { app.deleteItem(id: $0) } }
-                } primaryAction: { ids in
-                    app.selectedItemID = ids.first
-                }
+                ItemTable(app: app)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -285,7 +170,7 @@ struct BudgetEditorView: View {
                 Text("·")
                 Text(app.status).lineLimit(1)
                 Spacer()
-                Text("数值列可直接改；名称/备注在右侧面板编辑")
+                Text("双击单元格编辑 · 拖动行排序 · 列宽可拖")
                     .foregroundStyle(.tertiary)
             }
             .font(.system(size: 10))
@@ -313,22 +198,6 @@ struct BudgetEditorView: View {
     }
 
     // MARK: - 小工具
-
-    private func index(of item: ProjectItem) -> Int {
-        app.items.firstIndex { $0.id == item.id } ?? 0
-    }
-
-    private func readonlyCost(_ item: ProjectItem) -> ItemCost? {
-        app.costs[item.id]
-    }
-
-    private func num(_ value: Double?, formatter: (Double) -> String,
-                     bold: Bool = false) -> some View {
-        Text(value.map(formatter) ?? "—")
-            .font(.system(size: 11, weight: bold ? .medium : .regular, design: .rounded))
-            .monospacedDigit()
-            .lineLimit(1)
-    }
 
     private func writeTemplate() {
         guard let url = FilePanels.save(name: "定额导入模板.xlsx", ext: "xlsx") else { return }

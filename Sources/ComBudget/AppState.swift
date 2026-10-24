@@ -30,6 +30,9 @@ final class AppState: ObservableObject {
 
     @Published var route: Route?
     @Published var selectedItemID: Int64?
+    /// 变更版本号：每次重算 +1，供 NSTableView 判断是否需要 reload
+    @Published var revision: Int = 0
+
     @Published var status: String = "就绪"
     @Published var alertMessage: String?
     @Published var bootMessage: String = ""
@@ -122,6 +125,7 @@ final class AppState: ObservableObject {
     func recalc() {
         costs = BudgetCalculator.rowCosts(items: items, template: currentTemplate)
         summary = BudgetCalculator.summarize(items: items, template: currentTemplate)
+        revision &+= 1
     }
 
     var currentTemplate: FeeTemplate? {
