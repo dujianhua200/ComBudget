@@ -1,0 +1,53 @@
+name: build-macos-arm64
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  core-check:
+    # 核心层（数据/计算/Excel/PDF）不依赖 SwiftUI，先跑一遍自检
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Core self-check
+        run: ./tools/check.sh
+
+  build-app:
+    needs: core-check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build release (arm64)
+        run: swift build -c release
+
+      - name: Package .app
+        run: |
+          set -euo pipefail
+          APP="build/ComBudget.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp .build/release/ComBudget "$APP/Contents/MacOS/ComBudget"
+          cp Packaging/Info.plist "$APP/Contents/Info.plist"
+          cp data/quota451.sqlite "$APP/Contents/Resources/quota451.sqlite"
+          codesign --force --deep --sign - "$APP"
+          lipo -info "$APP/Contents/MacOS/ComBudget"
+          ditto -c -k --keepParent "$APP" ComBudget-macos-arm64.zip
+
+      - name: Smoke test (核心自检跑在 .app 内二进制同一份代码)
+        run: ./tools/check.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ComBudget-macos-arm64
+          path: ComBudget-macos-arm64.zip
+          retention-days: 30
