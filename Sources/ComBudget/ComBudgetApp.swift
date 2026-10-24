@@ -13,6 +13,7 @@ struct ComBudgetApp: App {
             RootView()
                 .environmentObject(app)
         }
+        .defaultSize(width: 1440, height: 900)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
