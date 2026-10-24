@@ -160,95 +160,102 @@ struct BudgetEditorView: View {
             if app.items.isEmpty {
                 emptyHint
             } else {
+                // 注意：TableColumnBuilder 单层最多 10 列，故用 TableColumnGroup 分组表头
                 Table(app.items, selection: $app.selectedItemID) {
-                    TableColumn("序号") { item in
-                        Text("\(index(of: item) + 1)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    .width(38)
+                    TableColumnGroup("定额") {
+                        TableColumn("序号") { item in
+                            Text("\(index(of: item) + 1)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .width(38)
 
-                    TableColumn("定额编号") { item in
-                        Text(item.quotaCode)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.tint)
-                    }
-                    .width(80)
+                        TableColumn("编号") { item in
+                            Text(item.quotaCode)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.tint)
+                        }
+                        .width(78)
 
-                    TableColumn("定额名称") { item in
-                        Text(item.quotaName)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .help(item.quotaName)
-                    }
-                    .width(min: 140, ideal: 220)
+                        TableColumn("名称") { item in
+                            Text(item.quotaName)
+                                .font(.system(size: 11))
+                                .lineLimit(1)
+                                .help(item.quotaName)
+                        }
+                        .width(min: 150, ideal: 230)
 
-                    TableColumn("单位") { item in
-                        Text(item.unit)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                        TableColumn("单位") { item in
+                            Text(item.unit)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .width(46)
                     }
-                    .width(46)
 
-                    TableColumn("工程量") { item in
-                        TextField("", value: Binding(
-                            get: { item.quantity },
-                            set: { v in app.apply({ $0.quantity = v }, to: item.id) }),
-                                  format: .number.precision(.fractionLength(0...4)))
-                            .textFieldStyle(.plain)
-                            .multilineTextAlignment(.trailing)
-                            .font(.system(size: 11, design: .rounded))
-                            .monospacedDigit()
-                    }
-                    .width(74)
+                    TableColumnGroup("工程量") {
+                        TableColumn("数量") { item in
+                            TextField("", value: Binding(
+                                get: { item.quantity },
+                                set: { v in app.apply({ $0.quantity = v }, to: item.id) }),
+                                      format: .number.precision(.fractionLength(0...4)))
+                                .textFieldStyle(.plain)
+                                .multilineTextAlignment(.trailing)
+                                .font(.system(size: 11, design: .rounded))
+                                .monospacedDigit()
+                        }
+                        .width(74)
 
-                    TableColumn("系数") { item in
-                        TextField("", value: Binding(
-                            get: { item.workdayCoeff },
-                            set: { v in app.apply({ $0.workdayCoeff = v }, to: item.id) }),
-                                  format: .number.precision(.fractionLength(0...3)))
-                            .textFieldStyle(.plain)
-                            .multilineTextAlignment(.trailing)
-                            .font(.system(size: 11, design: .rounded))
-                            .monospacedDigit()
-                    }
-                    .width(54)
+                        TableColumn("系数") { item in
+                            TextField("", value: Binding(
+                                get: { item.workdayCoeff },
+                                set: { v in app.apply({ $0.workdayCoeff = v }, to: item.id) }),
+                                      format: .number.precision(.fractionLength(0...3)))
+                                .textFieldStyle(.plain)
+                                .multilineTextAlignment(.trailing)
+                                .font(.system(size: 11, design: .rounded))
+                                .monospacedDigit()
+                        }
+                        .width(54)
 
-                    TableColumn("技工") { item in
-                        num(readonlyCost(item)?.techWorkdays, formatter: Fmt.workday)
-                    }
-                    .width(54)
+                        TableColumn("技工") { item in
+                            num(readonlyCost(item)?.techWorkdays, formatter: Fmt.workday)
+                        }
+                        .width(52)
 
-                    TableColumn("普工") { item in
-                        num(readonlyCost(item)?.laborWorkdays, formatter: Fmt.workday)
+                        TableColumn("普工") { item in
+                            num(readonlyCost(item)?.laborWorkdays, formatter: Fmt.workday)
+                        }
+                        .width(52)
                     }
-                    .width(54)
 
-                    TableColumn("人工费") { item in
-                        num(readonlyCost(item)?.labor, formatter: Fmt.money)
-                    }
-                    .width(80)
+                    TableColumnGroup("费用（元）") {
+                        TableColumn("人工费") { item in
+                            num(readonlyCost(item)?.labor, formatter: Fmt.money)
+                        }
+                        .width(80)
 
-                    TableColumn("主材费") { item in
-                        num(readonlyCost(item)?.mainMaterial, formatter: Fmt.money)
-                    }
-                    .width(78)
+                        TableColumn("主材费") { item in
+                            num(readonlyCost(item)?.mainMaterial, formatter: Fmt.money)
+                        }
+                        .width(78)
 
-                    TableColumn("机械费") { item in
-                        num(readonlyCost(item)?.machine, formatter: Fmt.money)
-                    }
-                    .width(70)
+                        TableColumn("机械费") { item in
+                            num(readonlyCost(item)?.machine, formatter: Fmt.money)
+                        }
+                        .width(70)
 
-                    TableColumn("仪表费") { item in
-                        num(readonlyCost(item)?.instrument, formatter: Fmt.money)
-                    }
-                    .width(70)
+                        TableColumn("仪表费") { item in
+                            num(readonlyCost(item)?.instrument, formatter: Fmt.money)
+                        }
+                        .width(70)
 
-                    TableColumn("小计") { item in
-                        num(readonlyCost(item)?.direct, formatter: Fmt.money, bold: true)
+                        TableColumn("小计") { item in
+                            num(readonlyCost(item)?.direct, formatter: Fmt.money, bold: true)
+                        }
+                        .width(88)
                     }
-                    .width(88)
 
                     TableColumn("备注") { item in
                         Text(item.note)
@@ -257,7 +264,7 @@ struct BudgetEditorView: View {
                             .lineLimit(1)
                             .help(item.note)
                     }
-                    .width(min: 60, ideal: 100)
+                    .width(min: 60, ideal: 110)
                 }
                 .tableStyle(.inset(alternatesRowBackgrounds: true))
                 .contextMenu(forSelectionType: ProjectItem.ID.self) { ids in
