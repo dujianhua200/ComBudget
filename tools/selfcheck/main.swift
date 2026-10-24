@@ -61,5 +61,47 @@ if args.contains("--import-seed"), let srcIdx = args.firstIndex(of: "--import-se
     exit(0)
 }
 
+// ---- 生成一个示例工程（用于界面演示/截图，主材价为假设值） ----
+if args.contains("--make-demo"), let idx = args.firstIndex(of: "--make-demo"), args.count > idx + 1 {
+    do {
+        let adb = try AppDatabase(path: args[idx + 1])
+        var p = Project.newDraft()
+        p.name = "示例工程-架空光缆（主材价为假设值）"
+        p.code = "DEMO-2026-001"
+        p.specialty = "有线通信"
+        p.owner = "示例建设单位"
+        p.contractor = "示例施工单位"
+        p.compiler = "示例"
+        p.feeTemplateID = try adb.fee.templates().first?.id ?? 0
+        let project = try adb.project.create(p)
+        let picks: [(String, Double, [String: Double])] = [
+            ("TXL1-001", 120, [:]),
+            ("TXL3-101", 60, ["光缆": 3.2]),
+            ("TXL1-003", 12, [:]),
+            ("TXL2-001", 45, [:]),
+            ("TXL1-005", 8, [:])
+        ]
+        for (code, qty, prices) in picks {
+            guard let q = try adb.quota.item(code: code) else { continue }
+            let item = try adb.project.insertItem(projectID: project.id, quota: q, quantity: qty,
+                                                  techPrice: 114, laborPrice: 61)
+            if !prices.isEmpty {
+                var res = try adb.project.resources(itemID: item.id)
+                for i in res.indices {
+                    for (name, price) in prices where res[i].name.contains(name) {
+                        res[i].unitPrice = price
+                    }
+                }
+                try adb.project.replaceResources(itemID: item.id, resources: res)
+            }
+        }
+        print("已生成示例工程 id=\(project.id)")
+    } catch {
+        print("失败：\(error.localizedDescription)")
+        exit(1)
+    }
+    exit(0)
+}
+
 SelfTest.run()
 exit(SelfTest.passed ? 0 : 1)

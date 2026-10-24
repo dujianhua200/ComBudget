@@ -58,6 +58,15 @@ final class AppState: ObservableObject {
         dbs = database
         bootMessage = database.seedStatus
         reloadAll(selectFirst: true)
+
+        // 调试用：COMBUDGET_ROUTE=quota|fee 可直接打开对应页面（截图/排障）
+        if let r = ProcessInfo.processInfo.environment["COMBUDGET_ROUTE"] {
+            switch r {
+            case "quota": select(.quota)
+            case "fee":   select(.fee)
+            default:      break
+            }
+        }
     }
 
     // MARK: - 载入
