@@ -21,7 +21,7 @@ struct RootView: View {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 1180, minHeight: 720)
+        .frame(minWidth: 1180, idealWidth: 1440, minHeight: 720, idealHeight: 900)
         .alert("提示", isPresented: Binding(
             get: { app.alertMessage != nil },
             set: { if !$0 { app.alertMessage = nil } })) {

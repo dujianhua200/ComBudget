@@ -39,7 +39,7 @@ enum ItemColumnSpec: String, CaseIterable {
         switch self {
         case .index: return 40
         case .code: return 84
-        case .name: return 200
+        case .name: return 180
         case .unit: return 48
         case .qty: return 74
         case .coeff: return 62
@@ -50,7 +50,7 @@ enum ItemColumnSpec: String, CaseIterable {
         case .machine: return 72
         case .instrument: return 72
         case .subtotal: return 90
-        case .note: return 120
+        case .note: return 100
         }
     }
 
