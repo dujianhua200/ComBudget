@@ -103,5 +103,17 @@ if args.contains("--make-demo"), let idx = args.firstIndex(of: "--make-demo"), a
     exit(0)
 }
 
+// ---- 重新生成 docs/ 里的示例报表（不需要 Xcode） ----
+if args.contains("--make-samples"), let idx = args.firstIndex(of: "--make-samples"),
+   args.count > idx + 1 {
+    do {
+        try SampleOutput.run(outdir: args[idx + 1])
+    } catch {
+        print("失败：\(error.localizedDescription)")
+        exit(1)
+    }
+    exit(0)
+}
+
 SelfTest.run()
 exit(SelfTest.passed ? 0 : 1)

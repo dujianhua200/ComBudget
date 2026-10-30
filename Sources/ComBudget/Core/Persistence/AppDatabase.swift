@@ -38,8 +38,11 @@ final class AppDatabase {
             }
         }
 
-        if try fee.templates().isEmpty {
-            var tpl = SeedLibrary.defaultFeeTemplate()
+        // 内置取费模板按名字补齐（一般计税 / 简易计税），用户改过的同名模板不会被覆盖
+        let existing = Set(try fee.templates().map { $0.name })
+        for builtin in [SeedLibrary.defaultFeeTemplate(), SeedLibrary.simpleTaxFeeTemplate()]
+            where !existing.contains(builtin.name) {
+            var tpl = builtin
             try fee.save(&tpl)
         }
     }

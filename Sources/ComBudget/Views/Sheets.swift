@@ -315,9 +315,13 @@ struct ImportWizardView: View {
 struct ReportPreviewView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.dismiss) private var dismiss
-    @State private var index = 1
+    @State private var index = 0
+    /// 勾选要导出/打印的表：投标文件常常只要表一 + 表二
+    @State private var picked: Set<Int> = []
 
     private var tables: [ReportTable] { app.reportTables() }
+
+    private var chosen: [ReportTable] { tables.indices.filter { picked.contains($0) }.map { tables[$0] } }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -328,13 +332,37 @@ struct ReportPreviewView: View {
                         Text(t.title).tag(i)
                     }
                 }
-                .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 470)
+                .frame(width: 360)
                 Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             .padding(12)
+
+            // 选表条：全选 / 常用（表一+表二）/ 逐张开关
+            HStack(spacing: 6) {
+                Text("导出范围").font(.system(size: 10)).foregroundStyle(.secondary)
+                Button("全选") { picked = Set(tables.indices) }
+                Button("只要计价表") { picked = Set(tables.indices.filter { $0 < 5 }) }
+                Button("投标文件常用") { picked = [0, 1, 2] }
+                Divider().frame(height: 12)
+                ForEach(Array(tables.enumerated()), id: \.offset) { i, t in
+                    Toggle(shortTitle(t.title), isOn: Binding(
+                        get: { picked.contains(i) },
+                        set: { on in
+                            if on { picked.insert(i) } else { picked.remove(i) }
+                        }))
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 10))
+                }
+                Spacer()
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+            .onAppear { if picked.isEmpty { picked = Set(tables.indices) } }
+            .onChange(of: tables.count) { _ in picked = Set(tables.indices) }
 
             Divider()
 
@@ -348,30 +376,44 @@ struct ReportPreviewView: View {
                 Text("\(index < tables.count ? tables[index].rows.count : 0) 行数据")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                Text("已勾选 \(chosen.count)/\(tables.count) 张表")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    if let url = FilePanels.save(name: "\(app.project?.name ?? "预算")-预算表.xlsx",
-                                                 ext: "xlsx") { app.exportExcel(to: url) }
+                    guard let url = FilePanels.save(name: saveName + ".xlsx", ext: "xlsx") else { return }
+                    app.exportExcel(to: url, tables: chosen)
                 } label: {
                     Label("导出 Excel", systemImage: "arrow.up.doc")
                 }
+                .disabled(chosen.isEmpty)
                 Button {
-                    if let url = FilePanels.save(name: "\(app.project?.name ?? "预算")-预算表.pdf",
-                                                 ext: "pdf") { app.exportPDF(to: url) }
+                    guard let url = FilePanels.save(name: saveName + ".pdf", ext: "pdf") else { return }
+                    app.exportPDF(to: url, tables: chosen)
                 } label: {
                     Label("导出 PDF", systemImage: "arrow.up.doc.fill")
                 }
-                Button {
-                    app.printReports()
-                } label: {
+                .disabled(chosen.isEmpty)
+                Button { app.printReports(tables: chosen) } label: {
                     Label("打印", systemImage: "printer")
                 }
+                .disabled(chosen.isEmpty)
             }
             .font(.system(size: 11))
             .buttonStyle(.bordered)
             .controlSize(.small)
             .padding(10)
         }
-        .frame(width: 980, height: 680)
+        .frame(width: 980, height: 700)
+    }
+
+    private var saveName: String { "\(app.project?.name ?? "预算")-预算表" }
+
+    /// 表全称太长，勾选用简称
+    private func shortTitle(_ title: String) -> String {
+        for no in ["表一", "表三甲", "表三乙", "表三丙", "表四甲", "表五甲", "表二"] {
+            if title.contains(no) { return no }
+        }
+        return title
     }
 }

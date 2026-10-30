@@ -22,7 +22,7 @@ import Foundation
 // =============================================================================
 
 enum Schema {
-    static let version = 3
+    static let version = 4
 
     static let createAll = """
     CREATE TABLE IF NOT EXISTS meta (
@@ -215,6 +215,12 @@ enum Schema {
             UPDATE project_item SET labor_workday_base = labor_workday
             WHERE labor_workday_base = 0 AND labor_workday <> 0;
             """)
+        }
+
+        // v3 → v4：费用口径细化。旧的「间接费」是笼统一项，现在拆成规费 + 企业管理费，
+        // 旧数据全部并入企业管理费（不丢金额，用户可在取费模板里自行细分）
+        if current < 4 {
+            try db.exec("UPDATE fee_rate SET grp='企业管理费' WHERE grp='间接费';")
         }
 
         try db.run("UPDATE meta SET value=? WHERE key='schema_version';", [String(version)])

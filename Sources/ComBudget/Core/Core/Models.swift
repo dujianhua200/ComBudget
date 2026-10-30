@@ -171,16 +171,79 @@ struct ItemResource: Identifiable, Hashable {
 
 // MARK: - 取费
 
+// =============================================================================
+// 费用口径（451 号文 / 概预算编制规程）
+//
+//   建筑安装工程费 = 直接费 + 措施费 + 间接费 + 利润 + 税金
+//     · 直接费 = 人工费（技工 + 普工）+ 材料费（主要材料 + 辅助材料）
+//                + 机械使用费 + 仪表使用费
+//     · 间接费 = 规费 + 企业管理费
+//     · 税金   =（直接费 + 措施费 + 间接费 + 利润）× 税率
+//   工程总造价 = 建筑安装工程费 + 设备工器具购置费 + 工程建设其他费 + 预备费
+//
+// 所有费率都是模板里的可编辑项：地区文件、招标文件怎么说就怎么改，
+// 内置模板只是常用取值，界面里明确标注为「示例费率，需核定」。
+// =============================================================================
+
+/// 费用类别（决定金额归到哪个科目、报表怎么分组）
+enum FeeKind: String, CaseIterable, Identifiable, Codable {
+    case measures    = "措施费"
+    case regulation  = "规费"
+    case admin       = "企业管理费"
+    case profit      = "利润"
+    case tax         = "税金"
+    case other       = "工程建设其他费"
+    case contingency = "预备费"
+
+    var id: String { rawValue }
+
+    /// 计算与列报顺序（税金排在利润之后，预备费最后）
+    var order: Int {
+        switch self {
+        case .measures:    return 0
+        case .regulation:  return 1
+        case .admin:       return 2
+        case .profit:      return 3
+        case .tax:         return 4
+        case .other:       return 5
+        case .contingency: return 6
+        }
+    }
+
+    /// 是否计入建筑安装工程费（其他费、预备费单列在总造价里）
+    var isInstallation: Bool { self != .other && self != .contingency }
+
+    /// 旧模板里「间接费」是笼统的一项，现在拆成规费 + 企业管理费
+    static func of(_ group: String) -> FeeKind? {
+        if let k = FeeKind(rawValue: group) { return k }
+        if group == "间接费" { return .admin }
+        return nil
+    }
+}
+
 enum FeeBase: String, CaseIterable, Identifiable, Codable {
     case labor        = "人工费"
     case laborMachine = "人工费+机械费"
     case direct       = "直接费"
+    case beforeTax    = "税前造价"
+    case installation = "建筑安装工程费"
+    case projectTotal = "建安工程费+设备费+其他费"
+    /// 旧模板兼容项
     case directPlus   = "直接费+措施费+间接费"
 
     var id: String { rawValue }
+
+    /// 报表里基数写全称，列宽有限时用短名
+    var full: String {
+        switch self {
+        case .beforeTax:    return "直接费+措施费+间接费+利润"
+        case .projectTotal: return "建安工程费+设备费+其他费"
+        default:            return rawValue
+        }
+    }
 }
 
-struct FeeRate: Identifiable, Hashable {
+struct FeeRate: Identifiable, Hashable, Codable {
     var id: Int64 = 0
     var templateID: Int64 = 0
     var key: String = ""
@@ -193,7 +256,7 @@ struct FeeRate: Identifiable, Hashable {
     var note: String = ""
 }
 
-struct FeeTemplate: Identifiable, Hashable {
+struct FeeTemplate: Identifiable, Hashable, Codable {
     var id: Int64 = 0
     var name: String = "默认取费模板"
     var isBuiltin: Bool = false
@@ -271,13 +334,37 @@ struct FeeLine: Identifiable, Hashable {
 struct BudgetSummary {
     var itemCost = ItemCost()
     var feeLines: [FeeLine] = []
-    var measures: Double = 0
-    var indirect: Double = 0
+    /// 直接费构成在 itemCost 里（人工/主材/辅材/机械/仪表）
+    var measures: Double = 0       // 措施费
+    var regulation: Double = 0     // 规费（社保、公积金、工伤保险…）
+    var admin: Double = 0          // 企业管理费
     var profit: Double = 0
     var tax: Double = 0
+    var otherFees: Double = 0      // 工程建设其他费（表五）
+    var contingency: Double = 0    // 预备费
 
+    var indirect: Double { regulation + admin }
+    /// 建筑安装工程费
     var total: Double { itemCost.direct + measures + indirect + profit + tax }
-    var grandTotal: Double { total + itemCost.equipment }
+    /// 直接费 + 措施费 + 间接费 + 利润（税前造价，税金的计算基数）
+    var beforeTax: Double { itemCost.direct + measures + indirect + profit }
+
+    /// 某个费用科目的合计
+    func amount(of kind: FeeKind) -> Double {
+        switch kind {
+        case .measures:    return measures
+        case .regulation:  return regulation
+        case .admin:       return admin
+        case .profit:      return profit
+        case .tax:         return tax
+        case .other:       return otherFees
+        case .contingency: return contingency
+        }
+    }
+    /// 工程总造价 = 建安工程费 + 设备购置费 + 其他费 + 预备费
+    var grandTotal: Double {
+        total + itemCost.equipment + otherFees + contingency
+    }
 }
 
 // MARK: - 格式化
@@ -328,4 +415,59 @@ enum Fmt {
         f.dateFormat = "yyyy-MM-dd HH:mm"
         return f
     }()
+
+    // MARK: - 人民币大写（预算表的「合计（大写）」栏）
+
+    private static let upperDigits = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"]
+    private static let upperUnits = ["", "拾", "佰", "仟"]
+    private static let upperSections = ["", "万", "亿", "万亿"]
+
+    private static func pow10(_ n: Int) -> Int {
+        (0..<n).reduce(1) { acc, _ in acc * 10 }
+    }
+
+    /// 12345.67 → 壹万贰仟叁佰肆拾伍元陆角柒分（金额表惯用的大写写法）
+    static func cnyUpper(_ amount: Double) -> String {
+        guard amount >= 0.005 || amount <= -0.005 else { return "零元整" }
+        let negative = amount < 0
+        let value = Int64(round(min(abs(amount), 1e12) * 100))
+        let yuan = value / 100
+        let jiao = Int((value / 10) % 10)
+        let fen = Int(value % 10)
+
+        var result = ""
+        var rest = yuan
+        var sec = 0
+        var needZero = false          // 低一节有前导零，高位接上去时要补「零」
+        while rest > 0 {
+            let g = Int(rest % 10000)
+            var s = ""
+            var zeroFlag = false
+            for p in 0..<4 {
+                let d = (g / pow10(p)) % 10
+                if d == 0 {
+                    if !s.isEmpty { zeroFlag = true }
+                } else {
+                    s = upperDigits[d] + upperUnits[p] + (zeroFlag ? "零" : "") + s
+                    zeroFlag = false
+                }
+            }
+            if !s.isEmpty {
+                result = s + upperSections[sec] + (needZero ? "零" : "") + result
+                needZero = g < 1000
+            } else if !result.isEmpty {
+                needZero = true
+            }
+            rest /= 10000
+            sec += 1
+        }
+        var out = result + "元"
+        if jiao == 0 && fen == 0 {
+            out += "整"
+        } else {
+            out += jiao > 0 ? "\(upperDigits[jiao])角" : "零"
+            out += fen > 0 ? "\(upperDigits[fen])分" : "整"
+        }
+        return (negative ? "负" : "") + out
+    }
 }

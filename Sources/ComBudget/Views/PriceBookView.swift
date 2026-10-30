@@ -557,7 +557,6 @@ struct ConversionSheet: View {
             }
             .labelsHidden()
             .frame(width: 220)
-            .onChange(of: rule) { _ in }
 
             // 系数（可手改，预设只是起点）
             GroupBox("系数") {

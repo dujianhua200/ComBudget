@@ -538,33 +538,45 @@ final class AppState: ObservableObject {
 
     // MARK: - 报表
 
+    /// 通信工程概预算标准表式：表一总表 / 表二建安费用 / 表三甲工程量 /
+    /// 表三乙机械 / 表三丙仪表 / 表四甲器材 / 表五甲其他费
     func reportTables() -> [ReportTable] {
         guard let p = project else { return [] }
         return [
             ReportBuilder.summaryTable(project: p, template: currentTemplate, summary: summary),
+            ReportBuilder.installationTable(project: p, template: currentTemplate, summary: summary),
             ReportBuilder.detailTable(project: p, items: items, costs: costs,
                                       summary: summary, grouping: grouping),
+            ReportBuilder.machineTable(project: p, items: items, kind: .machine),
+            ReportBuilder.machineTable(project: p, items: items, kind: .instrument),
             ReportBuilder.materialTable(project: p, items: items),
-            ReportBuilder.machineTable(project: p, items: items)
+            ReportBuilder.otherFeeTable(project: p, summary: summary)
         ]
     }
 
-    func exportExcel(to url: URL) {
+    /// 导出 Excel。`tables` 不传就导出全套；传了就只导出勾选的那几张表
+    func exportExcel(to url: URL, tables: [ReportTable]? = nil) {
+        let chosen = tables ?? reportTables()
+        guard !chosen.isEmpty else { alertMessage = "没有勾选任何报表"; return }
         do {
-            try ExcelExporter.export(tables: reportTables(), to: url)
-            status = "已导出 Excel：\(url.lastPathComponent)"
+            try ExcelExporter.export(tables: chosen, to: url)
+            status = "已导出 Excel（\(chosen.count) 张表）：\(url.lastPathComponent)"
         } catch { alertMessage = error.localizedDescription }
     }
 
-    func exportPDF(to url: URL) {
+    func exportPDF(to url: URL, tables: [ReportTable]? = nil) {
+        let chosen = tables ?? reportTables()
+        guard !chosen.isEmpty else { alertMessage = "没有勾选任何报表"; return }
         do {
-            try PDFExporter.export(tables: reportTables(), to: url)
-            status = "已导出 PDF：\(url.lastPathComponent)"
+            try PDFExporter.export(tables: chosen, to: url)
+            status = "已导出 PDF（\(chosen.count) 张表）：\(url.lastPathComponent)"
         } catch { alertMessage = error.localizedDescription }
     }
 
-    func printReports() {
-        do { try PDFExporter.print(tables: reportTables()) } catch {
+    func printReports(tables: [ReportTable]? = nil) {
+        let chosen = tables ?? reportTables()
+        guard !chosen.isEmpty else { alertMessage = "没有勾选任何报表"; return }
+        do { try PDFExporter.print(tables: chosen) } catch {
             alertMessage = error.localizedDescription
         }
     }
@@ -621,5 +633,43 @@ final class AppState: ObservableObject {
         tpl.isBuiltin = false
         tpl.name = "新取费模板"
         return tpl
+    }
+
+    // MARK: - 取费模板导入 / 导出（JSON）
+
+    /// 导出一份或多份模板，便于团队共用、进 Git 管版本
+    func exportTemplates(_ list: [FeeTemplate], to url: URL) {
+        do {
+            try FeeTemplateIO.write(list, to: url)
+            status = "已导出取费模板 \(list.count) 份：\(url.lastPathComponent)"
+        } catch { alertMessage = error.localizedDescription }
+    }
+
+    /// 导入模板文件：同名不覆盖，自动改名落到自己的库里
+    @discardableResult
+    func importTemplates(from url: URL) -> Int {
+        do {
+            let incoming = try FeeTemplateIO.read(url)
+            let existing = Set(templates.map { $0.name })
+            var used = existing
+            var n = 0
+            for var tpl in incoming {
+                tpl.name = FeeTemplateIO.uniqueName(tpl.name, among: used)
+                used.insert(tpl.name)
+                try dbs.fee.save(&tpl)
+                n += 1
+            }
+            templates = try dbs.fee.templates()
+            status = "已导入取费模板 \(n) 份"
+            return n
+        } catch {
+            alertMessage = error.localizedDescription
+            return 0
+        }
+    }
+
+    /// 按当前工程试算一套模板（改费率时立刻看到差多少钱）
+    func trialSummarize(_ tpl: FeeTemplate) -> BudgetSummary {
+        BudgetCalculator.summarize(items: items, template: tpl)
     }
 }

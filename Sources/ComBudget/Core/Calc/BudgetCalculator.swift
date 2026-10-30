@@ -55,24 +55,34 @@ enum BudgetCalculator {
 
         guard let tpl = template else { return sum }
 
+        // 按 sortIndex 顺序逐项计算：后面的项可以拿前面已算出的科目做基数
+        // （例如税金要以「直接费+措施费+间接费+利润」为基数）
         for rate in tpl.sortedRates where rate.isEnabled {
+            let beforeTax = sum.itemCost.direct + sum.measures + sum.indirect + sum.profit
+            let installation = beforeTax + sum.tax
             let base: Double
             switch rate.base {
             case .labor:        base = sum.itemCost.labor
             case .laborMachine: base = sum.itemCost.labor + sum.itemCost.machine
             case .direct:       base = sum.itemCost.direct
-            case .directPlus:   base = sum.itemCost.direct + sum.measures + sum.indirect + sum.profit
+            case .beforeTax:    base = beforeTax
+            case .installation: base = installation
+            case .projectTotal: base = installation + sum.itemCost.equipment + sum.otherFees
+            case .directPlus:   base = sum.itemCost.direct + sum.measures + sum.indirect
             }
             let amount = base * rate.rate / 100.0
             sum.feeLines.append(FeeLine(key: rate.key, name: rate.name, group: rate.group,
-                                        baseLabel: rate.base.rawValue, baseValue: base,
+                                        baseLabel: rate.base.full, baseValue: base,
                                         rate: rate.rate, amount: amount))
-            switch rate.group {
-            case "措施费": sum.measures += amount
-            case "间接费": sum.indirect += amount
-            case "利润":   sum.profit += amount
-            case "税金":   sum.tax += amount
-            default:       break
+            guard let kind = FeeKind.of(rate.group) else { continue }
+            switch kind {
+            case .measures:    sum.measures += amount
+            case .regulation:  sum.regulation += amount
+            case .admin:       sum.admin += amount
+            case .profit:      sum.profit += amount
+            case .tax:         sum.tax += amount
+            case .other:       sum.otherFees += amount
+            case .contingency: sum.contingency += amount
             }
         }
         return sum

@@ -74,19 +74,32 @@ struct BudgetEditorView: View {
                     StatTile(title: "普工工日", value: Fmt.workday(app.summary.itemCost.laborWorkdays))
                     StatTile(title: "人工费", value: Fmt.money(app.summary.itemCost.labor))
                     StatTile(title: "主材费", value: Fmt.money(app.summary.itemCost.mainMaterial))
+                    StatTile(title: "辅材费", value: Fmt.money(app.summary.itemCost.auxMaterial))
                     StatTile(title: "机械费", value: Fmt.money(app.summary.itemCost.machine))
                     StatTile(title: "仪表费", value: Fmt.money(app.summary.itemCost.instrument))
                     StatTile(title: "直接费", value: Fmt.money(app.summary.itemCost.direct))
                     StatTile(title: "措施费", value: Fmt.money(app.summary.measures))
+                    StatTile(title: "规费", value: Fmt.money(app.summary.regulation))
+                    StatTile(title: "企业管理费", value: Fmt.money(app.summary.admin))
                     StatTile(title: "间接费", value: Fmt.money(app.summary.indirect))
                     StatTile(title: "利润", value: Fmt.money(app.summary.profit))
                     StatTile(title: "税金", value: Fmt.money(app.summary.tax))
                     StatTile(title: "建安工程费", value: Fmt.money(app.summary.total), emphasized: true)
+                        .help("直接费 + 措施费 + 间接费 + 利润 + 税金")
                     if app.summary.itemCost.equipment > 0 {
                         StatTile(title: "设备费", value: Fmt.money(app.summary.itemCost.equipment))
                     }
+                    if app.summary.otherFees > 0 {
+                        StatTile(title: "其他费", value: Fmt.money(app.summary.otherFees))
+                            .help("工程建设其他费，详见表五甲")
+                    }
+                    if app.summary.contingency > 0 {
+                        StatTile(title: "预备费", value: Fmt.money(app.summary.contingency))
+                    }
                     StatTile(title: "总造价", value: Fmt.money(app.summary.grandTotal),
                              tint: .accentColor, emphasized: true)
+                        .help("建安工程费 + 设备购置费 + 其他费 + 预备费\n"
+                              + Fmt.cnyUpper(app.summary.grandTotal))
                 }
             }
         }

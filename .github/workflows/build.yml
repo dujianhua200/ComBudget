@@ -16,6 +16,17 @@ jobs:
       - name: Core self-check
         run: ./tools/check.sh
 
+      # 顺手把七张标准表的示例产物也生成出来（只用核心层，不需要 Xcode），
+      # 想先看表格样式的话直接下载这个 artifact
+      - name: Generate sample reports
+        run: ./.build/combudget-cli --make-samples docs/samples
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ComBudget-示例报表-表一至表五甲
+          path: docs/samples
+          retention-days: 30
+
   build-app:
     needs: core-check
     runs-on: macos-14

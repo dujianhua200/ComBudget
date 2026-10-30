@@ -69,19 +69,73 @@ enum SeedLibrary {
         }
     }
 
-    /// 内置取费模板（费率示例值，需按 451 号文/招标文件核定）
+    /// 内置取费模板
+    ///
+    /// 科目按 451 号文口径铺满：措施费 → 间接费（规费 + 企业管理费）→ 利润 → 税金，
+    /// 再加 工程建设其他费（表五）与 预备费。
+    /// **费率全部是示例值**：规费/社保类按各地文件，税种与税率随政策变（一般计税 9%、
+    /// 简易计税 3%），开工前必须按招标文件、工程所在地造价管理部门文件逐项核对，
+    /// 界面里可以直接改、也可以另存成自己的模板。
     static func defaultFeeTemplate() -> FeeTemplate {
-        var tpl = FeeTemplate(name: "451 默认取费模板（示例费率）", isBuiltin: true,
+        var tpl = FeeTemplate(name: "451 默认取费模板（示例费率·需核定）", isBuiltin: true,
                               auxMaterialRate: 0.3,
-                              note: "示例费率：请按 451 号文/招标文件核定后使用")
+                              note: "示例费率：请按 451 号文 / 工程所在地文件 / 招标文件核定后使用")
         tpl.rates = [
-            FeeRate(key: "cs_safety", name: "安全文明施工费", group: "措施费", base: .labor, rate: 3.0, sortIndex: 0, note: "示例值"),
-            FeeRate(key: "cs_temp",   name: "临时设施费",     group: "措施费", base: .labor, rate: 1.5, sortIndex: 1, note: "示例值"),
-            FeeRate(key: "ij_manage", name: "企业管理费",     group: "间接费", base: .labor, rate: 25.0, sortIndex: 2, note: "示例值"),
-            FeeRate(key: "ij_guifei", name: "规费",           group: "间接费", base: .labor, rate: 12.0, sortIndex: 3, note: "示例值"),
-            FeeRate(key: "lr",        name: "利润",           group: "利润",   base: .labor, rate: 8.0, sortIndex: 4, note: "示例值"),
-            FeeRate(key: "tax",       name: "税金（增值税）", group: "税金",   base: .directPlus, rate: 9.0, sortIndex: 5, note: "一般计税法示例值")
+            // —— 措施费（以人工费为基数）——
+            FeeRate(key: "cs_safe",   name: "安全文明施工费",   group: FeeKind.measures.rawValue,
+                    base: .labor, rate: 2.5, sortIndex: 10, note: "示例值"),
+            FeeRate(key: "cs_temp",   name: "临时设施费",       group: FeeKind.measures.rawValue,
+                    base: .labor, rate: 1.5, sortIndex: 11, note: "示例值"),
+            FeeRate(key: "cs_winter", name: "冬雨季施工增加费", group: FeeKind.measures.rawValue,
+                    base: .labor, rate: 1.0, sortIndex: 12, note: "示例值"),
+
+            // —— 间接费：规费（人工费为基数）——
+            FeeRate(key: "gf_social", name: "社会保障费",       group: FeeKind.regulation.rawValue,
+                    base: .labor, rate: 16.0, sortIndex: 20, note: "示例值，按当地社保文件"),
+            FeeRate(key: "gf_fund",   name: "住房公积金",       group: FeeKind.regulation.rawValue,
+                    base: .labor, rate: 8.0, sortIndex: 21, note: "示例值，按当地缴存比例"),
+            FeeRate(key: "gf_injury", name: "工伤保险费",       group: FeeKind.regulation.rawValue,
+                    base: .labor, rate: 1.0, sortIndex: 22, note: "示例值"),
+
+            // —— 间接费：企业管理费 ——
+            FeeRate(key: "qy_manage",  name: "企业管理费",      group: FeeKind.admin.rawValue,
+                    base: .labor, rate: 18.0, sortIndex: 30, note: "示例值"),
+            FeeRate(key: "qy_finance", name: "财务费用",        group: FeeKind.admin.rawValue,
+                    base: .labor, rate: 1.0, sortIndex: 31, note: "示例值"),
+
+            // —— 利润 ——
+            FeeRate(key: "lr", name: "利润", group: FeeKind.profit.rawValue,
+                    base: .labor, rate: 7.0, sortIndex: 40, note: "示例值，按招标文件"),
+
+            // —— 税金（以税前造价为基数；简易计税把税率改成 3%）——
+            FeeRate(key: "tax", name: "税金（增值税）", group: FeeKind.tax.rawValue,
+                    base: .beforeTax, rate: 9.0, sortIndex: 50, note: "一般计税 9%；简易计税改 3%"),
+
+            // —— 工程建设其他费（表五，不计入建安工程费）——
+            FeeRate(key: "qt_manage", name: "建设单位管理费", group: FeeKind.other.rawValue,
+                    base: .installation, rate: 1.5, sortIndex: 60, note: "示例值，按财政部/主管部门文件分档"),
+            FeeRate(key: "qt_design", name: "勘察设计费",     group: FeeKind.other.rawValue,
+                    base: .installation, rate: 3.0, sortIndex: 61, note: "示例值，按收费标准分档"),
+            FeeRate(key: "qt_superv", name: "工程监理费",     group: FeeKind.other.rawValue,
+                    base: .installation, rate: 2.0, sortIndex: 62, note: "示例值，按发改价格文件分档"),
+
+            // —— 预备费 ——
+            FeeRate(key: "by_basic", name: "基本预备费", group: FeeKind.contingency.rawValue,
+                    base: .projectTotal, rate: 3.0, sortIndex: 70, note: "示例值")
         ]
+        return tpl
+    }
+
+    /// 简易计税模板（小规模 / 清包工等场景，税率 3%）
+    static func simpleTaxFeeTemplate() -> FeeTemplate {
+        var tpl = defaultFeeTemplate()
+        tpl.name = "简易计税模板（税率 3%·示例费率）"
+        tpl.isBuiltin = true
+        tpl.note = "简易计税：税金按 3%，规费/企管费率同样需按当地文件核定"
+        for i in tpl.rates.indices where tpl.rates[i].key == "tax" {
+            tpl.rates[i].rate = 3.0
+            tpl.rates[i].note = "简易计税 3%"
+        }
         return tpl
     }
 }

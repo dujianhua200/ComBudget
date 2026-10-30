@@ -169,14 +169,17 @@ enum SelfTest {
             let costs = BudgetCalculator.rowCosts(items: items, template: tpl)
             let tables = [
                 ReportBuilder.summaryTable(project: created, template: tpl, summary: summary),
+                ReportBuilder.installationTable(project: created, template: tpl, summary: summary),
                 ReportBuilder.detailTable(project: created, items: items, costs: costs, summary: summary),
+                ReportBuilder.machineTable(project: created, items: items, kind: .machine),
+                ReportBuilder.machineTable(project: created, items: items, kind: .instrument),
                 ReportBuilder.materialTable(project: created, items: items),
-                ReportBuilder.machineTable(project: created, items: items)
+                ReportBuilder.otherFeeTable(project: created, summary: summary)
             ]
             let excelOut = tmp.appendingPathComponent("预算表.xlsx")
             try ExcelExporter.export(tables: tables, to: excelOut)
             let back = try XlsxReader.read(url: excelOut)
-            check("Excel 导出并可回读", back.count == 4, "\(back.count) 个工作表")
+            check("Excel 导出并可回读（表一～表五甲）", back.count == 7, "\(back.count) 个工作表")
 
             let pdfOut = tmp.appendingPathComponent("预算表.pdf")
             try PDFExporter.export(tables: tables, to: pdfOut)
@@ -184,7 +187,16 @@ enum SelfTest {
             check("PDF 导出", size > 3000, "\(size) 字节")
 
             let materialRows = ReportBuilder.materialTable(project: created, items: items).rows.count
-            check("主材表有内容（定额关联生效）", materialRows > 0, "\(materialRows) 行")
+            check("表四甲器材表有内容（定额关联生效）", materialRows > 0, "\(materialRows) 行")
+            // 这几条管式子目本身不带机械/仪表，先几何聚合口径对（同类同名同价要合并成一行），
+            // 表三乙有数据的情况放在第 7 节换算子目那里验
+            let machineRows = ReportBuilder.machineTable(project: created, items: items,
+                                                         kind: .machine).rows.count
+            let machineKeys = Set(items.flatMap { $0.resources }
+                .filter { $0.kind == .machine }
+                .map { "\($0.name)|\($0.spec)|\($0.unit)|\($0.unitPrice)" })
+            check("表三乙按「名称+规格+单位+单价」合并",
+                  machineRows == machineKeys.count, "\(machineRows) 行 / \(machineKeys.count) 种")
 
             // ---------- 6. 价格库与套价 ----------
             print("\n[6] 价格库与套价")
@@ -318,6 +330,22 @@ enum SelfTest {
             check("还原后资源回到定额原量",
                   victim.resources.allSatisfy { $0.qtyOverride == nil })
 
+            // 带机械的子目在库里，这才有机会验证表三乙（第 5 节那几条没有机械）
+            let spread0 = try db.project.items(projectID: created.id)
+            let machineCross = ReportBuilder.machineTable(project: created, items: spread0,
+                                                          kind: .machine)
+            check("表三乙机械表有内容", !machineCross.rows.isEmpty, "\(machineCross.rows.count) 行")
+            let crossAmount = Double(machineCross.rows.compactMap { row -> Double? in
+                Double(row.last?.replacingOccurrences(of: ",", with: "") ?? "")
+            }.reduce(0, +))
+            let manualMachine = spread0.reduce(0.0) { sum, it in
+                sum + it.resources.filter { $0.kind == .machine }
+                    .reduce(0.0) { $0 + $1.effectiveQtyPerUnit * it.quantity * $1.unitPrice }
+            }
+            check("表三乙台班金额 = 单价×台班×工程量",
+                  abs(crossAmount - manualMachine) < 1.0,
+                  "\(Fmt.money(crossAmount)) vs \(Fmt.money(manualMachine))")
+
             let original = ConversionPresets.all.first { $0.isIdentity }!
             var idItem = pricedItems[0]
             QuotaConverter.apply(original, to: &idItem)
@@ -419,7 +447,184 @@ enum SelfTest {
                       "\(importedItems.count)/\(items.count)")
                 check("工程包自带定额库", try db2.quota.count() == quotaCount,
                       "\(try db2.quota.count()) 条")
+
+                // 换机器打开工程包：价格库跟着走，套价结果要能复现
+                let srcItems = try db.project.items(projectID: created.id)
+                let stdTpl = SeedLibrary.defaultFeeTemplate()
+                let srcSum = BudgetCalculator.summarize(items: srcItems, template: stdTpl)
+                let dstSum = BudgetCalculator.summarize(items: importedItems, template: stdTpl)
+                check("工程包自带价格库", (try db2.price.count()) > 0,
+                      "包里带 \(try db2.price.count()) 条价格")
+                check("换库后金额与原工程一致",
+                      abs(srcSum.itemCost.mainMaterial - dstSum.itemCost.mainMaterial) < 0.01
+                      && abs(srcSum.total - dstSum.total) < 0.01,
+                      "主材 \(Fmt.money(dstSum.itemCost.mainMaterial))，建安 \(Fmt.money(dstSum.total))")
+                // 资源单价跟着工程包走，不用重新套价就该有价
+                let pricedCount = importedItems.flatMap { $0.resources }
+                    .filter { $0.unitPrice > 0 }.count
+                check("资源单价随包走（不重新套价也有价）", pricedCount > 0,
+                      "\(pricedCount) 项有单价")
+                _ = try db2.project.applyPrices(projectID: pid, overwrite: false)
+                let reSum = BudgetCalculator.summarize(
+                    items: try db2.project.items(projectID: pid), template: stdTpl)
+                check("在别的机器上重新套价结果不变",
+                      abs(reSum.itemCost.mainMaterial - dstSum.itemCost.mainMaterial) < 0.01,
+                      "\(Fmt.money(reSum.itemCost.mainMaterial))")
             }
+
+            // ---------- 10. 费用口径（451）与标准报表 ----------
+            print("\n[10] 费用组成与标准报表")
+            let feeItems = try db.project.items(projectID: created.id)
+            let s = BudgetCalculator.summarize(items: feeItems, template: tpl)
+            guard let tplRates = tpl?.sortedRates else { throw ImportError.noRows }
+
+            // 直接费 = 人工 + 主材 + 辅材 + 机械 + 仪表
+            let directSum = s.itemCost.labor + s.itemCost.mainMaterial + s.itemCost.auxMaterial
+                + s.itemCost.machine + s.itemCost.instrument
+            check("直接费 = 人工+主材+辅材+机械+仪表",
+                  abs(directSum - s.itemCost.direct) < 0.01, Fmt.money(directSum))
+            check("间接费 = 规费 + 企业管理费",
+                  abs(s.indirect - (s.regulation + s.admin)) < 0.01, Fmt.money(s.indirect))
+            check("建安工程费 = 直接费+措施费+间接费+利润+税金",
+                  abs(s.total - (s.itemCost.direct + s.measures + s.indirect + s.profit + s.tax)) < 0.01,
+                  Fmt.money(s.total))
+
+            // 税金 = 税前造价 × 税率（税后基数不能倒过来用）
+            let taxRate = (tplRates.first { $0.key == "tax" })?.rate ?? 0
+            check("税金 = 税前造价 × 税率",
+                  abs(s.tax - s.beforeTax * taxRate / 100) < 1.0,
+                  "\(Fmt.money(s.beforeTax)) × \(taxRate)% = \(Fmt.money(s.tax))")
+            check("总造价 = 建安工程费+设备费+其他费+预备费",
+                  abs(s.grandTotal - (s.total + s.itemCost.equipment + s.otherFees + s.contingency)) < 0.01,
+                  Fmt.money(s.grandTotal))
+            // 其他费/预备费单列在总造价里，不进建安工程费
+            check("其他费与预备费不计入建安工程费",
+                  s.otherFees > 0 && s.contingency > 0 && s.total < s.grandTotal,
+                  "建安 \(Fmt.money(s.total)) < 总造价 \(Fmt.money(s.grandTotal))")
+            // 科目齐全：内置模板要铺满 451 口径的每一类
+            let kinds = Set(tplRates.compactMap { FeeKind.of($0.group) })
+            check("内置模板科目齐全（措施费/规费/企管/利润/税金/其他费/预备费）",
+                  kinds.count == FeeKind.allCases.count,
+                  kinds.map { $0.rawValue }.sorted().joined(separator: "、"))
+
+            // 标准表式
+            let feeTables = [
+                ReportBuilder.summaryTable(project: created, template: tpl, summary: s),
+                ReportBuilder.installationTable(project: created, template: tpl, summary: s),
+                ReportBuilder.detailTable(project: created, items: feeItems,
+                                          costs: BudgetCalculator.rowCosts(items: feeItems, template: tpl),
+                                          summary: s),
+                ReportBuilder.machineTable(project: created, items: feeItems, kind: .machine),
+                ReportBuilder.machineTable(project: created, items: feeItems, kind: .instrument),
+                ReportBuilder.materialTable(project: created, items: feeItems),
+                ReportBuilder.otherFeeTable(project: created, summary: s)
+            ]
+            check("标准报表 7 张（表一～表五甲）", feeTables.count == 7,
+                  feeTables.map { $0.title }.joined(separator: " / "))
+
+            // 表一、表二 的合计行要对得上总造价
+            let tableOne = feeTables[0]
+            let totalRow = tableOne.rows.last { $0[1].contains("工程总造价（大写）") }
+            check("表一有大写金额行", !(totalRow?.isEmpty ?? true), totalRow?[2] ?? "")
+            let tableTwo = feeTables[1]
+            let twoTotal = tableTwo.rows.last { $0[1].contains("建筑安装工程费合计") }
+            check("表二建安合计 = 汇总口径",
+                  twoTotal?[4] == Fmt.money(s.total), "\(twoTotal?[4] ?? "") vs \(Fmt.money(s.total))")
+            // 表格之间的数字必须一致（表一建安 = 表二合计）
+            let oneInstall = tableOne.rows.first { $0[1] == "建筑安装工程费" }
+            check("表一建安 = 表二合计", oneInstall?[4] == twoTotal?[4],
+                  "\(oneInstall?[4] ?? "") vs \(twoTotal?[4] ?? "")")
+
+            let allPDF = tmp.appendingPathComponent("标准报表.pdf")
+            try PDFExporter.export(tables: feeTables, to: allPDF)
+            let allSize = (try FileManager.default.attributesOfItem(atPath: allPDF.path)[.size] as? Int) ?? 0
+            check("标准报表可导出 PDF", allSize > 8000, "\(allSize) 字节")
+
+            // 大写金额：这是国内造价表的硬要求，错了整份预算作废
+            check("大写：壹万贰仟叁佰肆拾伍元陆角柒分",
+                  Fmt.cnyUpper(12345.67) == "壹万贰仟叁佰肆拾伍元陆角柒分", Fmt.cnyUpper(12345.67))
+            check("大写：壹亿零伍元整",
+                  Fmt.cnyUpper(100000005) == "壹亿零伍元整", Fmt.cnyUpper(100000005))
+            check("大写：壹佰零伍元零伍分",
+                  Fmt.cnyUpper(105.05) == "壹佰零伍元零伍分", Fmt.cnyUpper(105.05))
+            check("大写：壹拾元整", Fmt.cnyUpper(10) == "壹拾元整", Fmt.cnyUpper(10))
+            check("大写：零元整", Fmt.cnyUpper(0) == "零元整", Fmt.cnyUpper(0))
+            check("大写：角整", Fmt.cnyUpper(100.5) == "壹佰元伍角整", Fmt.cnyUpper(100.5))
+
+            // 简易计税模板
+            let simple = SeedLibrary.simpleTaxFeeTemplate()
+            check("简易计税模板税率 3%",
+                  (simple.rates.first { $0.key == "tax" })?.rate == 3.0,
+                  "\(simple.rates.first { $0.key == "tax" }?.rate ?? -1)%")
+            let simpleSummary = BudgetCalculator.summarize(items: feeItems, template: simple)
+            check("换模板后税金变小", simpleSummary.tax < s.tax,
+                  "\(Fmt.money(s.tax)) → \(Fmt.money(simpleSummary.tax))")
+
+            // ---------- 11. 可定制：取费模板导出 / 导入 ----------
+            print("\n[11] 取费模板 JSON 导入导出")
+            guard var shareTemplate = tpl else { throw ImportError.noRows }
+            shareTemplate.rates[0].rate = 9.99            // 改一处，验证内容真的被带上
+            let shareURL = tmp.appendingPathComponent("取费模板.json")
+            try FeeTemplateIO.write([shareTemplate], to: shareURL)
+            check("模板可导出 JSON",
+                  ((try FileManager.default.attributesOfItem(atPath: shareURL.path)[.size] as? Int) ?? 0) > 200,
+                  "\(try Data(contentsOf: shareURL).count) 字节")
+
+            let decoded = try FeeTemplateIO.read(shareURL)
+            check("导出后可原样读回", decoded.count == 1
+                  && decoded[0].name == shareTemplate.name
+                  && decoded[0].rates.count == shareTemplate.rates.count,
+                  "\(decoded.first?.name ?? "") \(decoded.first?.rates.count ?? 0) 项")
+
+            let same = zip(decoded[0].sortedRates, shareTemplate.sortedRates)
+                .allSatisfy { $0.name == $1.name && $0.group == $1.group
+                    && $0.base == $1.base && $0.rate == $1.rate }
+            check("费率明细逐项一致", same, "含改过的 \(decoded[0].sortedRates.first?.rate ?? 0)%")
+
+            // 裸数组（不包一层 File）也要能读，手写模板时少一层外套很常见
+            let bare = try JSONEncoder().encode(shareTemplate.sortedRates.isEmpty ? [] : [shareTemplate])
+            check("裸数组也能读", (try? FeeTemplateIO.decode(bare).count) == 1)
+            struct WrongFile: Codable { var format: String; var templates: [FeeTemplate] }
+            let wrongFormat = try JSONEncoder().encode(
+                WrongFile(format: "not.mine", templates: [shareTemplate]))
+            let rejected = (try? FeeTemplateIO.decode(wrongFormat)) == nil
+            check("不是本软件的文件会被拒", rejected)
+
+            // 导入：id 清零重新入库，同名不覆盖原模板
+            let beforeCount = try db.fee.templates().count
+            var incoming = decoded[0]
+            incoming.name = shareTemplate.name
+            try db.fee.save(&incoming)
+            let midCount = try db.fee.templates().count
+            check("导入后库里多一套模板", midCount == beforeCount + 1,
+                  "\(beforeCount) → \(midCount)")
+            let names = Set(try db.fee.templates().map { $0.name })
+            check("同名模板不会被覆盖（自动改名）", names.contains(shareTemplate.name)
+                  && FeeTemplateIO.uniqueName(shareTemplate.name, among: names) != shareTemplate.name,
+                  FeeTemplateIO.uniqueName(shareTemplate.name, among: names))
+
+            // 改过的费率要真的能算出不同的钱（定制是有意义的）
+            let originalSummary = BudgetCalculator.summarize(items: feeItems, template: tpl)
+            let editedSummary = BudgetCalculator.summarize(items: feeItems, template: decoded[0])
+            check("改一处费率就能算出不同的总造价",
+                  abs(originalSummary.grandTotal - editedSummary.grandTotal) > 0.01,
+                  "\(Fmt.money(originalSummary.grandTotal)) vs \(Fmt.money(editedSummary.grandTotal))")
+
+            // ---------- 12. 报表可选表导出 ----------
+            print("\n[12] 按需导出报表")
+            let pickedTables: [ReportTable] = [
+                ReportBuilder.summaryTable(project: created, template: tpl, summary: s),
+                ReportBuilder.installationTable(project: created, template: tpl, summary: s)
+            ]
+            let pickPDF = tmp.appendingPathComponent("只要表一表二.pdf")
+            try PDFExporter.export(tables: pickedTables, to: pickPDF)
+            let pickSize = (try FileManager.default.attributesOfItem(atPath: pickPDF.path)[.size] as? Int) ?? 0
+            check("可只导出勾选的表", pickSize > 3000 && pickSize < allSize,
+                  "\(pickSize) 字节 < 全套 \(allSize) 字节")
+            let pickXlsx = tmp.appendingPathComponent("只要表一表二.xlsx")
+            try ExcelExporter.export(tables: pickedTables, to: pickXlsx)
+            check("选表导出同样能出 Excel",
+                  (try? XlsxReader.read(url: pickXlsx).count) == 2)
         } catch {
             passed = false
             failures.append("异常：\(error.localizedDescription)")

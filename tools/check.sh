@@ -14,7 +14,7 @@ echo "==> 编译核心层（Core + selfcheck）"
 swiftc -O -swift-version 5 -target arm64-apple-macosx13.0 \
   -o "$OUT" \
   $(find Sources/ComBudget/Core -name '*.swift' | sort) \
-  tools/selfcheck/SelfTest.swift tools/selfcheck/main.swift
+  tools/selfcheck/SelfTest.swift tools/selfcheck/SampleOutput.swift tools/selfcheck/main.swift
 
 echo "==> 运行自检"
 "$OUT" --selftest "$@"
