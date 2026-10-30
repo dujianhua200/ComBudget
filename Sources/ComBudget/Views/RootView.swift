@@ -76,6 +76,8 @@ struct RootView: View {
                     .tag(AppState.Route.quota)
                 Label("取费模板", systemImage: "percent")
                     .tag(AppState.Route.fee)
+                Label("资源价格库", systemImage: "yensign.circle")
+                    .tag(AppState.Route.price)
             }
         }
         .listStyle(.sidebar)
@@ -123,6 +125,8 @@ struct RootView: View {
             QuotaBrowserView(pickerMode: false)
         case .fee:
             FeeTemplateView()
+        case .price:
+            PriceBookView()
         case .none:
             WelcomeView()
         }

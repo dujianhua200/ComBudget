@@ -6,15 +6,23 @@ import Foundation
 // v2 相比 v1 的变化：人工拆成「技工/普工」两栏（与 451 定额原书一致），
 // 定额库增加 series / book / work（工作内容）字段，并支持从内置 451 库整库导入。
 //
+// v3 相比 v2 的变化：
+//   · 新增 resource_price 价格库（451 手册只有消耗量、没有单价，单价是另一本价格册）；
+//   · project_item 增加 chapter / series（用于「按分册分组小计」）；
+//   · project_item 增加 tech_workday_base / labor_workday_base / conv_note（定额换算：
+//     保留定额原值时，换算后的工日和换算痕迹另存，便于审计回溯）。
+//
 // 设计要点：
 // 1. quota_* 是定额库（内置 3091 条 451 全册 + 用户补充定额）。
 // 2. project_item_resource 是「资源快照」：插入子目时把定额的主材/机械/仪表消耗量
 //    复制到工程里，之后改定额库不影响已编工程，保证造价可复现。
 // 3. 取费模板拆成 fee_template + fee_rate，费率项可增删、可排序、可选计算基数。
+// 4. price_* 是独立的价格库：一套 sweeping price 可被多个工程复用，
+//    套价时写到 project_item_resource.unit_price（工程自己的快照里）。
 // =============================================================================
 
 enum Schema {
-    static let version = 2
+    static let version = 3
 
     static let createAll = """
     CREATE TABLE IF NOT EXISTS meta (
@@ -96,7 +104,12 @@ enum Schema {
         tech_price     REAL DEFAULT 114,
         labor_price    REAL DEFAULT 61,
         note           TEXT DEFAULT '',
-        is_supplement  INTEGER DEFAULT 0
+        is_supplement  INTEGER DEFAULT 0,
+        chapter        TEXT DEFAULT '',
+        series         TEXT DEFAULT '',
+        tech_workday_base  REAL DEFAULT 0,
+        labor_workday_base REAL DEFAULT 0,
+        conv_note      TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_item_project ON project_item(project_id, sort_index);
 
@@ -137,6 +150,21 @@ enum Schema {
         note        TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_fee_rate_tpl ON fee_rate(template_id, sort_index);
+
+    -- ---------- 价格库（451 手册只有消耗量，单价来自另一本价格册） ----------
+    CREATE TABLE IF NOT EXISTS resource_price (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        spec       TEXT DEFAULT '',
+        unit       TEXT DEFAULT '',
+        unit_price REAL NOT NULL DEFAULT 0,
+        source     TEXT DEFAULT '',
+        updated_at REAL DEFAULT 0
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uk_resource_price
+        ON resource_price(kind, name, spec, unit);
+    CREATE INDEX IF NOT EXISTS idx_price_name ON resource_price(name);
     """
 
     static func migrate(_ db: SQLiteDB) throws {
@@ -151,11 +179,52 @@ enum Schema {
         guard current < version else { return }
 
         // v1 → v2：定额库结构变了（人工拆技工/普工），直接重建定额表并清空，稍后由内置库重新导入
-        try db.exec("""
-        DROP TABLE IF EXISTS quota_resource;
-        DROP TABLE IF EXISTS quota_item;
-        """)
-        try db.exec(createAll)
+        if current < 2 {
+            try db.exec("""
+            DROP TABLE IF EXISTS quota_resource;
+            DROP TABLE IF EXISTS quota_item;
+            """)
+            try db.exec(createAll)
+        }
+
+        // v2 → v3：只加列，不破坏已有工程数据
+        if current < 3 {
+            try addColumn(db, table: "project_item", name: "chapter",
+                          ddl: "chapter TEXT DEFAULT ''")
+            try addColumn(db, table: "project_item", name: "series",
+                          ddl: "series TEXT DEFAULT ''")
+            try addColumn(db, table: "project_item", name: "tech_workday_base",
+                          ddl: "tech_workday_base REAL DEFAULT 0")
+            try addColumn(db, table: "project_item", name: "labor_workday_base",
+                          ddl: "labor_workday_base REAL DEFAULT 0")
+            try addColumn(db, table: "project_item", name: "conv_note",
+                          ddl: "conv_note TEXT DEFAULT ''")
+            // 老库的 project_item 没有 series/chapter，从定额库回填，保证分组小计可用
+            try db.exec("""
+            UPDATE project_item SET series = COALESCE(
+                (SELECT series FROM quota_item WHERE quota_item.code = project_item.quota_code), series)
+            WHERE series IS NULL OR series = '';
+            UPDATE project_item SET chapter = COALESCE(
+                (SELECT chapter FROM quota_item WHERE quota_item.code = project_item.quota_code), chapter)
+            WHERE chapter IS NULL OR chapter = '';
+            """)
+            // 老库没有换算功能，定额原值就等于当时写库的工日值，先原样兜底
+            try db.exec("""
+            UPDATE project_item SET tech_workday_base = tech_workday
+            WHERE tech_workday_base = 0 AND tech_workday <> 0;
+            UPDATE project_item SET labor_workday_base = labor_workday
+            WHERE labor_workday_base = 0 AND labor_workday <> 0;
+            """)
+        }
+
         try db.run("UPDATE meta SET value=? WHERE key='schema_version';", [String(version)])
+    }
+
+    /// ALTER TABLE ADD COLUMN（幂等：列已存在就跳过）
+    private static func addColumn(_ db: SQLiteDB, table: String, name: String, ddl: String) throws {
+        let exists = try db.query("PRAGMA table_info(\(table));") { $0.text(1) }
+            .contains { $0 == name }
+        guard !exists else { return }
+        try db.exec("ALTER TABLE \(table) ADD COLUMN \(ddl);")
     }
 }

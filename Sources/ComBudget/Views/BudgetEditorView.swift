@@ -17,6 +17,8 @@ struct BudgetEditorView: View {
     @State private var showProperties = false
     @State private var showQuotaPicker = false
     @State private var showInspector = true
+    @State private var showConversion = false
+    @State private var showPriceImport = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,6 +45,10 @@ struct BudgetEditorView: View {
         }
         .sheet(isPresented: $showImport) { ImportWizardView() }
         .sheet(isPresented: $showReport) { ReportPreviewView() }
+        .sheet(isPresented: $showConversion) {
+            if let id = app.selectedItemID { ConversionSheet(itemID: id) }
+        }
+        .sheet(isPresented: $showPriceImport) { PriceImportWizard() }
     }
 
     // MARK: - 头部
@@ -110,6 +116,16 @@ struct BudgetEditorView: View {
             } label: { Label("删除", systemImage: "trash") }
                 .disabled(app.selectedItemID == nil)
                 .help("删除选中子目")
+
+            Divider()
+
+            // 撤销 / 重做：自己的 History 栈，一步 = 一次用户操作
+            Button { app.undo() } label: { Label("撤销", systemImage: "arrow.uturn.backward") }
+                .disabled(!app.canUndo)
+                .help(app.undoTitle)
+            Button { app.redo() } label: { Label("重做", systemImage: "arrow.uturn.forward") }
+                .disabled(!app.canRedo)
+                .help(app.redoTitle)
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
@@ -117,6 +133,51 @@ struct BudgetEditorView: View {
                 showImport = true
             } label: { Label("导入", systemImage: "square.and.arrow.down") }
                 .help("从 Excel 批量导入定额行")
+
+            // 套价：451 手册只给消耗量，单价来自价格库/询价
+            Menu {
+                Button("按价格库套价（覆盖全部）") { app.applyPricesToProject(overwrite: true) }
+                Button("只补未定价的资源") { app.applyPricesToProject(overwrite: false) }
+                Divider()
+                Button("导入价格清单…") { showPriceImport = true }
+                Button("生成价格模板…") { writePriceTemplate() }
+                Divider()
+                Button("打开资源价格库") { app.select(.price) }
+            } label: {
+                Label("套价", systemImage: "yensign.circle")
+            }
+            .help("用价格库给主材/机械/仪表填单价")
+
+            // 定额换算：人工/机械/仪表系数
+            Menu {
+                Button("换算选中子目…") { showConversion = true }
+                    .disabled(app.selectedItemID == nil)
+                if app.convertedItemCount > 0 {
+                    Button("还原选中子目为定额原值") {
+                        if let id = app.selectedItemID { app.revokeConversion(id: id) }
+                    }
+                }
+                Divider()
+                Menu("整工程套用") {
+                    ForEach(ConversionPresets.all) { rule in
+                        Button(rule.name) { app.convertProject(rule: rule) }
+                    }
+                }
+            } label: {
+                Label("换算", systemImage: "slider.horizontal.3")
+            }
+            .help("定额换算（人工/机械/仪表系数）")
+
+            Picker("分组", selection: Binding(
+                get: { app.grouping },
+                set: { app.setGrouping($0) })) {
+                ForEach(GroupingKey.allCases) { key in
+                    Text(key.rawValue).tag(key)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 110)
+            .help("按分册 / 章分组并显示分部小计")
 
             Button {
                 showReport = true
@@ -167,6 +228,12 @@ struct BudgetEditorView: View {
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 8) {
                 Text("\(app.items.count) 条子目")
+                if let hint = priceHint {
+                    Text("·")
+                    Text(hint)
+                        .foregroundStyle(app.prices.isEmpty ? Color.secondary : Color.orange)
+                        .help("451 手册不含单价，主材/机械/仪表需要在价格库里填价后套价")
+                }
                 Text("·")
                 Text(app.status).lineLimit(1)
                 Spacer()
@@ -179,6 +246,13 @@ struct BudgetEditorView: View {
             .padding(.vertical, 4)
             .background(.bar)
         }
+    }
+
+    /// 底部状态栏的套价提示：让「主材费为 0」这件事有个明确解释
+    private var priceHint: String? {
+        let audit = app.priceAudit()
+        guard audit.total > 0, audit.unpriced > 0 else { return nil }
+        return "未定价资源 \(audit.unpriced)/\(audit.total)"
     }
 
     private var emptyHint: some View {
@@ -207,5 +281,11 @@ struct BudgetEditorView: View {
         } catch {
             app.alertMessage = error.localizedDescription
         }
+    }
+
+    /// 价格清单模板（类型/名称/规格/单位/单价/来源 六列）
+    private func writePriceTemplate() {
+        guard let url = FilePanels.save(name: "价格库导入模板.xlsx", ext: "xlsx") else { return }
+        app.writePriceTemplate(to: url)
     }
 }

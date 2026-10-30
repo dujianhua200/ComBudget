@@ -14,6 +14,8 @@ struct ReportTable: Identifiable {
     var footers: [[String]] = []
     var rightAligned: [Bool]
     var widths: [CGFloat]
+    /// 需要加粗的行的下标（分组标题行、小计行），导出与预览共用同一套口径
+    var emphasizedRows: Set<Int> = []
 }
 
 enum ReportBuilder {
@@ -81,35 +83,68 @@ enum ReportBuilder {
     // MARK: - 表二 定额明细表
 
     static func detailTable(project: Project, items: [ProjectItem], costs: [Int64: ItemCost],
-                            summary: BudgetSummary) -> ReportTable {
+                            summary: BudgetSummary, grouping: GroupingKey = .none) -> ReportTable {
         var rows: [[String]] = []
-        for (i, item) in items.enumerated() {
+        var emphasized: Set<Int> = []
+
+        func bodyRow(_ seq: Int, _ item: ProjectItem) -> [String] {
             let c = costs[item.id] ?? ItemCost()
-            rows.append([
-                "\(i + 1)", item.quotaCode, item.quotaName, item.unit,
+            return [
+                "\(seq)", item.quotaCode, item.quotaName, item.unit,
                 Fmt.quantity(item.quantity),
                 String(format: "%.2f", item.workdayCoeff),
                 Fmt.workday(c.techWorkdays), Fmt.workday(c.laborWorkdays),
                 Fmt.money(c.labor), Fmt.money(c.mainMaterial),
                 Fmt.money(c.machine), Fmt.money(c.instrument),
                 Fmt.money(c.direct), item.note
-            ])
+            ]
         }
+
+        func subtotalRow(_ label: String, _ g: GroupCost) -> [String] {
+            ["", label, "", "", "", "",
+             Fmt.workday(g.techWorkdays), Fmt.workday(g.laborWorkdays),
+             Fmt.money(g.labor), Fmt.money(g.mainMaterial), Fmt.money(g.machine),
+             Fmt.money(g.instrument), Fmt.money(g.direct), ""]
+        }
+
+        if grouping == .none {
+            for (i, item) in items.enumerated() { rows.append(bodyRow(i + 1, item)) }
+        } else {
+            // 分组：每组先一行组标题，再逐条列子目，最后一行小计
+            let groups = BudgetGrouping.group(items: items, costs: costs, key: grouping)
+            var seq = 0
+            for g in groups {
+                emphasized.insert(rows.count)
+                rows.append(["", "【\(g.title)】", "共 \(g.items.count) 条", "", "", "",
+                             "", "", "", "", "", "", "", ""])
+                for item in g.items {
+                    seq += 1
+                    rows.append(bodyRow(seq, item))
+                }
+                emphasized.insert(rows.count)
+                rows.append(subtotalRow("\(g.title) 小计", g.cost))
+            }
+            // 分组模式下最后补一行总合计，方便和汇总表对账
+            emphasized.insert(rows.count)
+            rows.append(subtotalRow("总计", BudgetGrouping.total(items: items, costs: costs)))
+        }
+
         let c = summary.itemCost
         return ReportTable(
-            title: "定额明细表（表二）",
+            title: grouping == .none ? "定额明细表（表二）" : "定额明细表（表二 · \(grouping.rawValue)）",
             subtitle: head(project),
             header: ["序号", "定额编号", "定额名称", "单位", "工程量", "系数",
                      "技工工日", "普工工日", "人工费", "主材费", "机械费", "仪表费", "小计", "备注"],
             rows: rows,
-            footers: [[
+            footers: grouping == .none ? [[
                 "", "合计", "", "", "", "",
                 Fmt.workday(c.techWorkdays), Fmt.workday(c.laborWorkdays),
                 Fmt.money(c.labor), Fmt.money(c.mainMaterial), Fmt.money(c.machine),
                 Fmt.money(c.instrument), Fmt.money(c.direct), ""
-            ]],
+            ]] : [],
             rightAligned: [false, false, false, false, true, true, true, true, true, true, true, true, true, false],
-            widths: [0.5, 1.0, 2.6, 0.7, 0.8, 0.7, 0.85, 0.85, 1.0, 1.0, 0.9, 0.9, 1.1, 1.2]
+            widths: [0.5, 1.0, 2.6, 0.7, 0.8, 0.7, 0.85, 0.85, 1.0, 1.0, 0.9, 0.9, 1.1, 1.2],
+            emphasizedRows: emphasized
         )
     }
 

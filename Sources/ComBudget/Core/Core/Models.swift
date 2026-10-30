@@ -132,8 +132,26 @@ struct ProjectItem: Identifiable, Hashable {
     var isSupplement: Bool = false
     var resources: [ItemResource] = []
 
+    // ---- v3 新增 ----
+    /// 所属章（用于分组小计，插入时从定额库复制快照）
+    var chapter: String = ""
+    /// 定额系列（如 TXL1，分组小计的首选分组键）
+    var series: String = ""
+    /// 定额原工日（换算前的值，换算后仍然保留，便于回溯）
+    var techWorkdayBase: Double = 0
+    var laborWorkdayBase: Double = 0
+    /// 换算痕迹，例如「洞内作业：技工×1.15 普工×1.15」
+    var convNote: String = ""
+
     var effectiveTechWorkday: Double { techWorkday * quantity * workdayCoeff }
     var effectiveLaborWorkday: Double { laborWorkday * quantity * workdayCoeff }
+
+    /// 尚未参与换算时的定额原值（老数据兜底）
+    var baseTech: Double { techWorkdayBase == 0 ? techWorkday : techWorkdayBase }
+    var baseLabor: Double { laborWorkdayBase == 0 ? laborWorkday : laborWorkdayBase }
+
+    /// 分组键：优先用系列（TXL1/TGD2…），没有系列的补充定额归入「补充子目」
+    var groupKey: String { series.isEmpty ? (isSupplement ? "补充子目" : "未分类") : series }
 }
 
 struct ItemResource: Identifiable, Hashable {
@@ -184,6 +202,42 @@ struct FeeTemplate: Identifiable, Hashable {
     var rates: [FeeRate] = []
 
     var sortedRates: [FeeRate] { rates.sorted { $0.sortIndex < $1.sortIndex } }
+}
+
+// MARK: - 价格库
+
+/// 价格库一条记录（451 手册只有消耗量，单价来自价格册/市场价）
+struct PriceEntry: Identifiable, Hashable {
+    var id: Int64 = 0
+    var kind: ResourceKind = .mainMaterial
+    var name: String = ""
+    var spec: String = ""
+    var unit: String = ""
+    var unitPrice: Double = 0
+    var source: String = ""
+    var updatedAt: Date = Date()
+
+    /// 匹配用的归一化 key：去掉空格与全角括号内容无关性不做处理，
+    /// 只规范空白字符，避免「螺栓 M12」与「螺栓 M12」因空格差异匹配不上
+    var matchName: String {
+        name.replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// 套价结果（用于界面告知「哪些资源没匹配上」，避免悄悄漏価格）
+struct PriceApplyResult {
+    var matched: Int = 0          // 成功套价的资源条数
+    var unchanged: Int = 0        // 单价已存在且不允许覆盖，跳过的条数
+    var missing: [String] = []    // 价格库里没有的资源（名称｜单位）
+    var fuzzy: Int = 0            // 其中靠「名称匹配/忽略单位」命中的条数（需人工复核）
+
+    var summary: String {
+        "套价 \(matched) 项" + (unchanged > 0 ? "，跳过 \(unchanged) 项已填价" : "")
+        + (missing.isEmpty ? "" : "，\(missing.count) 项无价格")
+        + (fuzzy > 0 ? "，其中 \(fuzzy) 项为模糊匹配需复核" : "")
+    }
 }
 
 // MARK: - 计算结果
@@ -262,6 +316,11 @@ enum Fmt {
 
     static func rate(_ v: Double) -> String {
         String(format: "%.3f%%", v)
+    }
+
+    /// 系数：统一两位小数（工程口径习惯写成 1.15 / 1.30，而不是 1.3）
+    static func coeff(_ v: Double) -> String {
+        String(format: "%.2f", v)
     }
 
     static let dateTime: DateFormatter = {

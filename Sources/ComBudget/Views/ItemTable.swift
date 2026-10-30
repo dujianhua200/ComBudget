@@ -134,7 +134,7 @@ struct ItemTable: NSViewRepresentable {
             table.reloadData()
         }
         if let id = app.selectedItemID,
-           let row = app.items.firstIndex(where: { $0.id == id }),
+           let row = context.coordinator.rowIndex(ofItemID: id),
            table.selectedRow != row {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
@@ -144,26 +144,91 @@ struct ItemTable: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+
+        /// 表格里的一行：可能是子目，也可能是分组标题 / 分组小计
+        struct Row {
+            enum Kind { case item, groupHeader, groupSubtotal }
+            var kind: Kind = .item
+            var item: ProjectItem?
+            var group: ItemGroup?
+        }
+
         var app: AppState
         weak var tableView: NSTableView?
         var revision = -1
 
+        // ── 分组行的行模型缓存（revision 变了才重算）──
+        private var rowCache: [Row] = []
+        private var rowRevision = -1
+        private var rowGrouping: GroupingKey = .none
+
         init(app: AppState) { self.app = app }
 
+        /// 展开后的行序列：分组开启时 = 组标题 + 组内子目 + 组小计，顺序与清单一致
+        func rows() -> [Row] {
+            if rowRevision == app.revision, rowGrouping == app.grouping, !rowCache.isEmpty {
+                return rowCache
+            }
+            rowRevision = app.revision
+            rowGrouping = app.grouping
+            guard app.grouping != .none, !app.groups.isEmpty else {
+                rowCache = app.items.map { Row(kind: .item, item: $0) }
+                return rowCache
+            }
+            var out: [Row] = []
+            for g in app.groups {
+                out.append(Row(kind: .groupHeader, group: g))
+                for it in g.items { out.append(Row(kind: .item, item: it)) }
+                out.append(Row(kind: .groupSubtotal, group: g))
+            }
+            rowCache = out
+            return out
+        }
+
+        /// 某行对应的子目（分组标题/小计行返回 nil）
+        func item(at row: Int) -> ProjectItem? {
+            let list = rows()
+            guard row >= 0, row < list.count else { return nil }
+            return list[row].item
+        }
+
+        /// 子目 id 对应的行号（用于选中同步）
+        func rowIndex(ofItemID id: Int64) -> Int? {
+            rows().firstIndex { $0.item?.id == id }
+        }
+
+        /// 拖拽落点：落到分组行上时，取最近的一条真实子目行
+        func nearestItemRow(_ row: Int) -> Int? {
+            let list = rows()
+            guard !list.isEmpty else { return nil }
+            let clamped = min(max(row, 0), list.count - 1)
+            if list[clamped].kind == .item { return clamped }
+            for i in stride(from: clamped, through: 0, by: -1) where list[i].kind == .item { return i }
+            for i in clamped..<list.count where list[i].kind == .item { return i }
+            return nil
+        }
+
         // 数据源
-        func numberOfRows(in tableView: NSTableView) -> Int { app.items.count }
+        func numberOfRows(in tableView: NSTableView) -> Int { rows().count }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let id = tableColumn?.identifier.rawValue,
-                  let spec = ItemColumnSpec(rawValue: id),
-                  row < app.items.count else { return nil }
-            let item = app.items[row]
+                  let spec = ItemColumnSpec(rawValue: id) else { return nil }
+            let list = rows()
+            guard row < list.count else { return nil }
+            let entry = list[row]
+            // 分组标题 / 分组小计行：整行都是只读的汇总文字
+            if entry.kind != .item { return groupCell(spec: spec, entry: entry) }
+
+            guard let item = entry.item else { return nil }
             let cost = app.costs[item.id] ?? ItemCost()
 
             let (text, color, weight): (String, NSColor, NSFont.Weight)
             switch spec {
             case .index:
-                (text, color, weight) = ("\(row + 1)", .secondaryLabelColor, .regular)
+                // 分组模式下表格行号 ≠ 子目序号，这里显示子目在清单里的真实序号
+                let seq = (app.items.firstIndex(where: { $0.id == item.id }) ?? row) + 1
+                (text, color, weight) = ("\(seq)", .secondaryLabelColor, .regular)
             case .code:
                 (text, color, weight) = (item.quotaCode, .controlAccentColor, .regular)
             case .name:
@@ -212,11 +277,70 @@ struct ItemTable: NSViewRepresentable {
             return field
         }
 
+        /// 分组标题行 / 分组小计行的单元格
+        private func groupCell(spec: ItemColumnSpec, entry: Row) -> NSView? {
+            let g = entry.group
+            let isHeader = entry.kind == .groupHeader
+
+            var text = ""
+            var color: NSColor = .labelColor
+            var weight: NSFont.Weight = .medium
+
+            switch spec {
+            case .code:
+                text = isHeader ? (g?.key ?? "") : ""
+                color = .controlAccentColor
+            case .name:
+                text = isHeader ? "\(g?.title ?? "分组")（\(g?.items.count ?? 0) 条）" : "小计"
+                color = isHeader ? .labelColor : .secondaryLabelColor
+                weight = isHeader ? .semibold : .medium
+            case .tech:
+                text = isHeader ? "" : Fmt.workday(g?.cost.techWorkdays ?? 0)
+            case .labor:
+                text = isHeader ? "" : Fmt.workday(g?.cost.laborWorkdays ?? 0)
+            case .laborCost:
+                text = isHeader ? "" : Fmt.money(g?.cost.labor ?? 0)
+            case .material:
+                text = isHeader ? "" : Fmt.money(g?.cost.mainMaterial ?? 0)
+            case .machine:
+                text = isHeader ? "" : Fmt.money(g?.cost.machine ?? 0)
+            case .instrument:
+                text = isHeader ? "" : Fmt.money(g?.cost.instrument ?? 0)
+            case .subtotal:
+                text = isHeader ? "" : Fmt.money(g?.cost.direct ?? 0)
+                weight = .semibold
+            default:
+                text = ""
+            }
+
+            let field = NSTextField(string: text)
+            field.isBordered = false
+            field.drawsBackground = isHeader          // 标题行铺一层底纹，和小计/子目区分
+            field.backgroundColor = .controlBackgroundColor
+            field.focusRingType = .none
+            field.isEditable = false
+            field.isSelectable = false
+            field.alignment = spec.alignment
+            field.textColor = color
+            field.lineBreakMode = .byTruncatingTail
+            field.font = spec.mono
+                ? .monospacedDigitSystemFont(ofSize: 11, weight: weight)
+                : .systemFont(ofSize: 11, weight: weight)
+            field.cell?.wraps = false
+            field.cell?.isScrollable = true
+            return field
+        }
+
+        /// 分组标题/小计行不可选中（避免「选中了小计行」这种没意义的状态）
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            let list = rows()
+            guard row >= 0, row < list.count else { return false }
+            return list[row].kind == .item
+        }
+
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard let table = tableView, table.selectedRow >= 0,
-                  table.selectedRow < app.items.count else { return }
-            let id = app.items[table.selectedRow].id
-            if app.selectedItemID != id { app.selectedItemID = id }
+            guard let table = tableView, let item = item(at: table.selectedRow) else { return }
+            if app.selectedItemID != item.id { app.selectedItemID = item.id }
         }
 
         // 单元格编辑（失焦/回车提交，避免逐字符写库）
@@ -226,8 +350,7 @@ struct ItemTable: NSViewRepresentable {
                   let raw = field.identifier?.rawValue,
                   let spec = ItemColumnSpec(rawValue: raw) else { return }
             let row = table.row(for: field)
-            guard row >= 0, row < app.items.count else { return }
-            let item = app.items[row]
+            guard let item = item(at: row) else { return }
             let text = field.stringValue
 
             switch spec {
@@ -252,9 +375,9 @@ struct ItemTable: NSViewRepresentable {
 
         // 拖拽排序
         func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-            guard row < app.items.count else { return nil }
+            guard let item = item(at: row) else { return nil }
             let pb = NSPasteboardItem()
-            pb.setString("\(app.items[row].id)", forType: .budgetRow)
+            pb.setString("\(item.id)", forType: .budgetRow)
             return pb
         }
 
@@ -267,8 +390,9 @@ struct ItemTable: NSViewRepresentable {
                        row: Int, dropOperation op: NSTableView.DropOperation) -> Bool {
             guard let s = info.draggingPasteboard.string(forType: .budgetRow),
                   let id = Int64(s), !app.items.isEmpty else { return false }
-            let target = min(max(row, 0), app.items.count - 1)
-            app.moveItem(id: id, to: app.items[target].id)
+            // 分组模式下可能落在标题/小计行上，取最近的一条真实子目做落点
+            guard let target = nearestItemRow(row), let dest = item(at: target) else { return false }
+            app.moveItem(id: id, to: dest.id)
             return true
         }
 
@@ -276,8 +400,7 @@ struct ItemTable: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, menuForEvent event: NSEvent) -> NSMenu? {
             let point = tableView.convert(event.locationInWindow, from: nil)
             let row = tableView.row(at: point)
-            guard row >= 0, row < app.items.count else { return nil }
-            let item = app.items[row]
+            guard let item = item(at: row) else { return nil }
             tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
             let menu = NSMenu()

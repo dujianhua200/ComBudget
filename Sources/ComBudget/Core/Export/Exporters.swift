@@ -192,17 +192,22 @@ enum PDFExporter {
                     fill: NSColor(white: 0.93, alpha: 1))
 
             let bodyRows = table.rows + table.footers
+            let emphasizedCount = table.rows.count
             for (idx, row) in bodyRows.enumerated() {
-                let isFooter = idx >= table.rows.count
-                let h = measure(row, bodyFont)
+                let isFooter = idx >= emphasizedCount
+                // 分组标题行 / 小计行加粗，和预览、Excel 保持同一套口径
+                let isKey = !isFooter && table.emphasizedRows.contains(idx)
+                let font = isFooter ? footerFont : (isKey ? footerFont : bodyFont)
+                let h = measure(row, font)
                 if cursorY + h > pageSize.height - margin - 16 {
                     endPage()
                     beginPage()
                     drawRow(table.header, headerFont, height: measure(table.header, headerFont),
                             fill: NSColor(white: 0.93, alpha: 1))
                 }
-                drawRow(row, isFooter ? footerFont : bodyFont, height: h,
-                        fill: isFooter ? NSColor(white: 0.96, alpha: 1) : nil)
+                drawRow(row, font, height: h,
+                        fill: isFooter ? NSColor(white: 0.96, alpha: 1)
+                            : (isKey ? NSColor(white: 0.975, alpha: 1) : nil))
             }
             endPage()
         }

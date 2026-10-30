@@ -21,6 +21,13 @@ enum SelfTest {
         }
     }
 
+    /// 供闭包内部（撤销/重做之类延迟执行的逻辑）报告失败
+    static func noteFail(_ msg: String) {
+        passed = false
+        failures.append(msg)
+        print("  ✗ \(msg)")
+    }
+
     static func run() {
         print("ComBudget 自检开始\n")
         let keep = CommandLine.arguments.contains("--keep")
@@ -179,8 +186,226 @@ enum SelfTest {
             let materialRows = ReportBuilder.materialTable(project: created, items: items).rows.count
             check("主材表有内容（定额关联生效）", materialRows > 0, "\(materialRows) 行")
 
-            // ---------- 6. 工程包 ----------
-            print("\n[6] .combudget 工程包")
+            // ---------- 6. 价格库与套价 ----------
+            print("\n[6] 价格库与套价")
+            // 构造一份价格册样本：直接取定额里真实出现过的资源名，贴近实际询价清单
+            let sample = try db.db.query("""
+            SELECT DISTINCT qr.kind, qr.name, qr.unit FROM quota_resource qr
+            JOIN quota_item qi ON qi.id = qr.quota_id WHERE qi.code IN ('TXL3-222','TXL1-001')
+            LIMIT 30;
+            """) { r in (r.text(0), r.text(1), r.text(2)) }
+            var priceRows: [PriceEntry] = []
+            for (i, s) in sample.enumerated() {
+                priceRows.append(PriceEntry(kind: ResourceKind(rawValue: s.0) ?? .mainMaterial,
+                                            name: s.1, spec: "", unit: s.2,
+                                            unitPrice: Double(i + 1) * 10, source: "自检价格册"))
+            }
+            check("构造价格册样本", priceRows.count > 3, "\(priceRows.count) 条")
+            let savedPrices = try db.price.save(priceRows)
+            check("价格库批量 upsert", try db.price.count() == Set(priceRows.map { $0.name }).count || savedPrices > 0,
+                  "入库 \(savedPrices) 条 / 库内 \(try db.price.count()) 条")
+
+            // 重复导入同一批不翻倍
+            _ = try db.price.save(priceRows)
+            check("重复导入不翻倍", try db.price.count() == savedPrices,
+                  "库内仍为 \(try db.price.count()) 条")
+
+            let priceBefore = try db.project.items(projectID: created.id)
+                .flatMap { $0.resources }.filter { $0.unitPrice > 0 }.count
+            check("套价前多数资源单价为 0（451 手册不含价格）", priceBefore == 0, "\(priceBefore) 项有价")
+
+            let applied = try db.project.applyPrices(projectID: created.id)
+            print("     \(applied.summary)")
+            let pricedItems = try db.project.items(projectID: created.id)
+            let priced = pricedItems.flatMap { $0.resources }.filter { $0.unitPrice > 0 }
+            check("套价后资源有单价", !priced.isEmpty, "\(priced.count) 项")
+            check("价格库查不到的会列出", applied.missing.count >= 0,
+                  "未匹配 \(applied.missing.count) 项")
+
+            let afterCost = BudgetCalculator.summarize(items: pricedItems, template: tpl)
+            check("主材费不再为 0（套价生效）",
+                  afterCost.itemCost.mainMaterial > summary.itemCost.mainMaterial,
+                  "套价前 \(Fmt.money(summary.itemCost.mainMaterial)) → 套价后 \(Fmt.money(afterCost.itemCost.mainMaterial))")
+            check("直接费随套价变大", afterCost.itemCost.direct > summary.itemCost.direct,
+                  Fmt.money(afterCost.itemCost.direct))
+
+            // 新插入的子目应自动套价
+            guard let autoQ = try db.quota.item(code: "TXL3-222") else { throw ImportError.noRows }
+            let autoItem = try db.project.insertItem(projectID: created.id, quota: autoQ, quantity: 2,
+                                                     techPrice: 114, laborPrice: 61)
+            let autoPriced = autoItem.resources.filter { $0.unitPrice > 0 }.count
+            check("新插入子目自动套价", autoPriced > 0, "\(autoPriced)/\(autoItem.resources.count) 项")
+            try db.project.deleteItem(id: autoItem.id)
+
+            let priceSearch = try db.price.search(keyword: sample.first?.1 ?? "")
+            check("价格库可按名称检索", !priceSearch.isEmpty, "命中 \(priceSearch.count) 条")
+
+            // Excel 价格清单导入：生成模板 → 回读 → 入库 → 重复导入不翻倍
+            let priceXlsx = tmp.appendingPathComponent("价格清单.xlsx")
+            try PriceImporter.writeTemplate(to: priceXlsx)
+            let parsed = try PriceImporter.read(url: priceXlsx, config: PriceImportConfig())
+            check("价格模板可生成并回读", parsed.entries.count == 4, "\(parsed.entries.count) 条")
+            check("资源类型识别", PriceImporter.kind(of: "主要材料") == .mainMaterial
+                  && PriceImporter.kind(of: "机械") == .machine
+                  && PriceImporter.kind(of: "仪表") == .instrument)
+            check("单价解析", parsed.entries.first?.unitPrice == 58,
+                  "\(parsed.entries.first?.unitPrice ?? -1)")
+            // 库里已有的「类型+名称+规格+单位」不算新增，剩下的才应该插入
+            let existingKeys = Set(try db.price.search().map {
+                "\($0.kind.rawValue)|\($0.name)|\($0.spec)|\($0.unit)" })
+            let expectNew = Set(parsed.entries.map {
+                "\($0.kind.rawValue)|\($0.name)|\($0.spec)|\($0.unit)" })
+                .subtracting(existingKeys).count
+            let priceCountBefore = try db.price.count()
+            _ = try db.price.save(parsed.entries, source: "Excel 导入")
+            let priceCountAfter1 = try db.price.count()
+            check("价格表入库条数正确",
+                  priceCountAfter1 - priceCountBefore == expectNew,
+                  "应新增 \(expectNew) 条，实际 +\(priceCountAfter1 - priceCountBefore)")
+            _ = try db.price.save(parsed.entries, source: "Excel 导入")
+            check("重复导入不翻倍（按类型+名称+规格+单位 upsert）",
+                  try db.price.count() == priceCountAfter1,
+                  "导入一次 \(priceCountAfter1) 条，再导一次仍为 \(try db.price.count()) 条")
+            // 模板示例行的「价格来源」列写的是「示例价」；导入时该列非空，故不套用默认来源
+            let excelOnly = try db.price.all(source: "示例价")
+            check("可按来源取出价格（清空前留快照用）", excelOnly.count >= 3,
+                  "\(excelOnly.count) 条")
+            let landed = parsed.entries.allSatisfy { e in
+                ((try? db.price.search(keyword: e.name)
+                    .contains { $0.unit == e.unit && $0.unitPrice == e.unitPrice }) ?? false)
+            }
+            check("导入的价格可按名称查到且单价正确", landed)
+
+            // ---------- 7. 定额换算与分组小计 ----------
+            print("\n[7] 定额换算与分组小计")
+            // 换算测试要落到「真的有机械台班」的子目上：先从定额库找一条带机械的定额插进来
+            let machineCode = try db.db.query("""
+            SELECT qi.code FROM quota_item qi JOIN quota_resource qr ON qr.quota_id = qi.id
+            WHERE qr.kind = '机械' GROUP BY qi.code ORDER BY COUNT(*) DESC LIMIT 1;
+            """) { $0.text(0) }.first
+            guard let machineCode, let machineQuota = try db.quota.item(code: machineCode) else {
+                throw ImportError.noRows
+            }
+            var victim = try db.project.insertItem(projectID: created.id, quota: machineQuota,
+                                                   quantity: 5, techPrice: 114, laborPrice: 61)
+            _ = try db.project.applyPrices(projectID: created.id)
+            victim = try db.project.items(projectID: created.id).first { $0.id == victim.id } ?? victim
+            let beforeConv = BudgetCalculator.cost(of: victim, auxRate: tpl?.auxMaterialRate ?? 0.3)
+            guard let mountain = ConversionPresets.all.first(where: { $0.name == "山区·高海拔" }) else {
+                throw ImportError.noRows
+            }
+            let baseTech = victim.baseTech
+            QuotaConverter.apply(mountain, to: &victim)
+            let afterConv = BudgetCalculator.cost(of: victim, auxRate: tpl?.auxMaterialRate ?? 0.3)
+            check("换算后技工工日 = 原值×1.30", abs(victim.techWorkday - baseTech * 1.30) < 1e-9,
+                  "\(baseTech) → \(victim.techWorkday)")
+            check("换算保留定额原值", victim.techWorkdayBase == baseTech, "原值 \(victim.techWorkdayBase)")
+            check("换算写入痕迹", victim.convNote.contains("山区"), victim.convNote)
+            check("换算后人工费变大", afterConv.labor > beforeConv.labor,
+                  "\(Fmt.money(beforeConv.labor)) → \(Fmt.money(afterConv.labor))")
+
+            let machineBefore = victim.resources.filter { $0.kind == .machine }.map { $0.qtyPerUnit }
+            let machineAfter = victim.resources.filter { $0.kind == .machine }.map { $0.effectiveQtyPerUnit }
+            let machineOK = machineBefore.count == machineAfter.count
+                && zip(machineBefore, machineAfter).allSatisfy { abs($1 - $0 * 1.20) < 1e-9 }
+            check("机械台班×1.20 落到 qty_override（且保留 qty_per_unit 原值）",
+                  machineBefore.count > 0 && machineOK,
+                  "\(machineAfter.count) 项机械：\(machineBefore.first ?? 0) → \(machineAfter.first ?? 0)")
+
+            QuotaConverter.revoke(from: &victim)
+            check("还原回定额原值", abs(victim.techWorkday - baseTech) < 1e-9 && victim.convNote.isEmpty,
+                  "\(victim.techWorkday)")
+            check("还原后资源回到定额原量",
+                  victim.resources.allSatisfy { $0.qtyOverride == nil })
+
+            let original = ConversionPresets.all.first { $0.isIdentity }!
+            var idItem = pricedItems[0]
+            QuotaConverter.apply(original, to: &idItem)
+            check("×1.0 换算等于不换算", idItem.convNote.isEmpty && idItem.techWorkday == idItem.baseTech)
+            try db.project.deleteItem(id: victim.id)   // 换算测试用的临时子目不留在工程里
+
+            // 分组小计
+            let spreadItems = try db.project.items(projectID: created.id)
+            let spreadCosts = BudgetCalculator.rowCosts(items: spreadItems, template: tpl)
+            let series = Set(spreadItems.map { $0.series })
+            let groups = BudgetGrouping.group(items: spreadItems, costs: spreadCosts, key: .series)
+            check("按分册分组", groups.count == series.count,
+                  "\(groups.count) 组：\(groups.map { $0.title }.joined(separator: "、"))")
+            let groupSum = groups.reduce(0.0) { $0 + $1.cost.direct }
+            let manualSum = BudgetGrouping.total(items: spreadItems, costs: spreadCosts).direct
+            check("分组小计合计 = 全工程合计", abs(groupSum - manualSum) < 0.01,
+                  "\(Fmt.money(groupSum)) vs \(Fmt.money(manualSum))")
+            check("每个分组都有子目", groups.allSatisfy { !$0.items.isEmpty })
+
+            let groupedTable = ReportBuilder.detailTable(project: created, items: spreadItems,
+                                                         costs: spreadCosts, summary: summary,
+                                                         grouping: .series)
+            check("分组明细表行数多于子目数（含组标题与小计）",
+                  groupedTable.rows.count > spreadItems.count,
+                  "\(spreadItems.count) 条 → \(groupedTable.rows.count) 行")
+            check("分组明细表标记了加重行", !groupedTable.emphasizedRows.isEmpty,
+                  "\(groupedTable.emphasizedRows.count) 行")
+            let groupedPDF = tmp.appendingPathComponent("分组明细.pdf")
+            try PDFExporter.export(tables: [groupedTable], to: groupedPDF)
+            check("分组明细表可导出 PDF",
+                  ((try FileManager.default.attributesOfItem(atPath: groupedPDF.path)[.size] as? Int) ?? 0) > 3000)
+
+            // ---------- 8. 撤销 / 重做 ----------
+            print("\n[8] 撤销 / 重做")
+            let history = History()
+            var counter = 0
+            history.perform("加一") { counter += 1 } undo: { counter -= 1 }
+            check("perform 立即执行 redo", counter == 1, "counter=\(counter)")
+            check("可撤销", history.canUndo && history.undoLabel == "加一", history.undoLabel ?? "")
+            _ = history.undo()
+            check("撤销回到变更前", counter == 0, "counter=\(counter)")
+            check("撤销后可重做", history.canRedo && history.redoLabel == "加一")
+            _ = history.redo()
+            check("重做恢复变更", counter == 1, "counter=\(counter)")
+
+            // 真实链路：删子目 → 撤销 → 子目连同资源快照一起回来
+            let before = try db.project.items(projectID: created.id)
+            guard let doomed = before.first(where: { !$0.resources.isEmpty }) ?? before.first else {
+                throw ImportError.noRows
+            }
+            let snapshot = doomed
+            let h2 = History()
+            h2.register("删除子目", undo: {
+                do {
+                    _ = try db.project.restoreItem(snapshot)
+                } catch { SelfTest.noteFail("restoreItem 抛错：\(error.localizedDescription)") }
+            }, redo: {
+                do { try db.project.deleteItem(id: snapshot.id) } catch { SelfTest.noteFail("deleteItem 抛错：\(error.localizedDescription)") }
+            })
+            try db.project.deleteItem(id: doomed.id)
+            let afterDelete = try db.project.items(projectID: created.id)
+            check("删除生效", afterDelete.count == before.count - 1,
+                  "\(before.count) → \(afterDelete.count)")
+            _ = h2.undo()
+            let restored = try db.project.items(projectID: created.id)
+            let revived = restored.first { $0.id == snapshot.id }
+            check("撤销后子目回来了", revived != nil && restored.count == before.count,
+                  "\(restored.count) 条")
+            check("撤销后资源快照完整",
+                  (revived?.resources.count ?? -1) == snapshot.resources.count,
+                  "\(revived?.resources.count ?? -1)/\(snapshot.resources.count)")
+            // 注意：restore 会重建资源行，id 不可能与原快照一致，所以按「名称+单价」比对内容
+            let beforePrices = snapshot.resources
+                .map { "\($0.name)-\($0.unit)-\(Fmt.money($0.unitPrice))" }.sorted().joined(separator: ",")
+            let afterPrices = (revived?.resources ?? [])
+                .map { "\($0.name)-\($0.unit)-\(Fmt.money($0.unitPrice))" }.sorted().joined(separator: ",")
+            check("撤销后单价与消耗量保留", !beforePrices.isEmpty && beforePrices == afterPrices,
+                  afterPrices.isEmpty ? "（资源为空）" : String(afterPrices.prefix(50)))
+            _ = h2.redo()
+            check("重做再次删除", try db.project.items(projectID: created.id).count == before.count - 1)
+            _ = h2.undo()
+
+            // 新操作要清掉旧重做栈
+            h2.register("别的事", undo: {}, redo: {})
+            check("新操作后不可重做", !h2.canRedo, "canRedo=\(h2.canRedo)")
+
+            // ---------- 9. 工程包 ----------
+            print("\n[9] .combudget 工程包")
             let bundleURL = tmp.appendingPathComponent("工程包.\(ProjectBundle.fileExtension)")
             try ProjectBundle.export(db: db.db, projectID: created.id, to: bundleURL)
             check("工程包导出", FileManager.default.fileExists(atPath: bundleURL.path))

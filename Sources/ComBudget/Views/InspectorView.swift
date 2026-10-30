@@ -7,6 +7,7 @@ import SwiftUI
 
 struct InspectorView: View {
     @EnvironmentObject private var app: AppState
+    @State private var showConversion = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,6 +15,7 @@ struct InspectorView: View {
                 titleBar(item)
                 Divider()
                 form(item)
+                    .sheet(isPresented: $showConversion) { ConversionSheet(itemID: item.id) }
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "sidebar.right")
@@ -135,6 +137,28 @@ struct InspectorView: View {
                         .textFieldStyle(.roundedBorder)
                         .labelsHidden()
                 }
+                // 换算：系数写进工日/台班，痕迹留在 conv_note，随时可还原
+                LabeledContent("换算") {
+                    HStack(spacing: 6) {
+                        if item.convNote.isEmpty {
+                            Text("定额原值")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(item.convNote)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                                .lineLimit(2)
+                        }
+                        Spacer(minLength: 0)
+                        Button("换算…") { showConversion = true }
+                            .controlSize(.mini)
+                        if !item.convNote.isEmpty {
+                            Button("还原") { app.revokeConversion(id: item.id) }
+                                .controlSize(.mini)
+                        }
+                    }
+                }
             }
 
             Section("费用构成") {
@@ -169,9 +193,16 @@ struct InspectorView: View {
                     }
                 }
             } header: {
-                Text("资源明细（\(item.resources.count)）")
+                HStack(spacing: 6) {
+                    Text("资源明细（\(item.resources.count)）")
+                    Spacer()
+                    Button("按价格库补价") { app.applyPricesToItem(id: item.id, overwrite: false) }
+                        .controlSize(.mini)
+                        .disabled(app.prices.isEmpty)
+                        .help("只补单价为 0 的资源；已填的单价不会被覆盖")
+                }
             } footer: {
-                Text("单价为 0 表示尚未填价，主材费/机械费按 消耗量 × 单价 计入。")
+                Text("单价为 0 表示尚未填价，主材费/机械费按 消耗量 × 单价 计入；\n451 手册不含单价，请在「资源价格库」维护后套价。")
                     .font(.system(size: 9))
             }
         }

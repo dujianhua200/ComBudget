@@ -92,19 +92,24 @@ ComBudget/
 ├── .github/workflows/build.yml       macOS runner 编译 + 打包 + 上传 artifact
 ├── docs/                             示例输出（预算表 PDF/XLSX）、界面截图
 └── Sources/ComBudget/
-    ├── ComBudgetApp.swift            @main + 菜单命令
+    ├── ComBudgetApp.swift            @main + 菜单命令（含 ⌘Z / ⇧⌘Z）
     ├── AppState.swift                ViewModel（先写库→改内存→重算→刷新）
+    ├── AppState+Features.swift       价格库 / 套价 / 分组 / 换算 的状态层实现
     ├── Core/                         ★ 不依赖 SwiftUI，可在纯 CLT 下编译测试
     │   ├── Core/Models.swift
     │   ├── Persistence/              SQLiteDB / Schema / QuotaStore / ProjectStore /
-    │   │                             FeeStore / AppDatabase / SeedLibrary
-    │   ├── Calc/                     BudgetCalculator / ReportBuilder
+    │   │                             PriceStore / FeeStore / AppDatabase / SeedLibrary
+    │   ├── Calc/                     BudgetCalculator / ReportBuilder /
+    │   │                             BudgetGrouping（分组小计）/ QuotaConverter（定额换算）
+    │   ├── Undo/History.swift        撤销 / 重做栈（不依赖 UndoManager，可自检）
+    │   └── Excel/PriceImporter.swift 价格清单 Excel 导入 + 模板
     │   ├── Excel/                    ZipArchive / XlsxReader / XlsxWriter / ExcelImporter
     │   └── Export/Exporters.swift    Excel 导出 + Core Graphics 分页 PDF + 打印
     └── Views/                        SwiftUI 界面
         ├── RootView.swift            三栏骨架 / 工程树 / 欢迎页
         ├── BudgetEditorView.swift    清单表格 + 工具条 + 汇总条
-        ├── InspectorView.swift       子目属性 + 资源明细
+        ├── InspectorView.swift       子目属性 + 资源明细 + 换算痕迹
+        ├── PriceBookView.swift       资源价格库 / 价格导入向导 / 换算向导
         ├── QuotaBrowserView.swift    定额检索（3091 条）＋ 插入弹窗
         ├── FeeTemplateView.swift     取费模板编辑
         ├── Sheets.swift              工程属性 / 导入向导 / 报表预览
@@ -135,8 +140,10 @@ ComBudget/
 | `project` | code / name / category / specialty / scale / owner / contractor / compiler / reviewer / fee_template_id | 工程 |
 | `project_item` | project_id / sort_index / quota_code / quota_name / unit / quantity / workday_coeff / **tech_workday / labor_workday / tech_price / labor_price** / note / is_supplement | 清单行（定额快照） |
 | `project_item_resource` | item_id / kind / name / spec / unit / qty_per_unit / **qty_override** / unit_price / is_extra | 资源快照（可改用量的同时保留定额原值） |
+| `project_item`（v3 新增列） | **chapter / series / tech_workday_base / labor_workday_base / conv_note** | 分组小计的分组键、换算前的定额原值、换算痕迹 |
+| `resource_price` | kind / name / spec / unit / unit_price / source，**唯一键 (kind,name,spec,unit)** | 价格库：主材/机械/仪表单价（451 手册不含价格） |
 | `fee_template` / `fee_rate` | name / aux_rate；key / name / grp / base / rate / sort_index / is_enabled | 多套取费模板 |
-| `meta` | schema_version | 结构版本（v2） |
+| `meta` | schema_version | 结构版本（v3；v2→v3 走 `ALTER TABLE ADD COLUMN` 增量迁移） |
 
 `.combudget` 工程包 = 一份同结构 SQLite（`VACUUM INTO` 快照后剔除其它工程），
 自包含定额库与取费模板，拷到别的机器可直接打开。
@@ -152,7 +159,8 @@ ComBudget/
 │  └ 工程B  │ ┌──┬────┬──────┬──┬───┬──┬───┬───┬────┬──┐  │  工程量 系数  │
 │ 资料      │ │序号│编号│名称  │单位│工程量│系数│技工│普工│人工费│…│  │  技工/普工单价│
 │  ├ 定额库 │ └──┴────┴──────┴──┴───┴──┴───┴───┴────┴──┘  │  费用构成     │
-│  └ 取费模板│ 双击编辑 · 拖行排序 · 列宽可拖                 │  资源明细     │
+│  ├ 取费模板│ 双击编辑 · 拖行排序 · 列宽可拖                 │  资源明细     │
+│  └ 价格库 │ 分组：按分册 / 按章（清单含分部小计行）         │  换算痕迹     │
 └──────────┴────────────────────────────────────────────┴──────────────┘
 ```
 
@@ -162,6 +170,17 @@ ComBudget/
 - 名称/工程量/系数/备注 双击就地编辑；`⌘K` 插入定额；列宽可拖；属性面板可折叠。
 - 属性面板用原生分组 `Form`（LabeledContent + Section），与系统「检查器」一致；工具条最右可折叠。
 - 定额库页面：3091 条按册（31 个分册）+ 关键字检索，右侧详情含工作内容与资源消耗，一键插入。
+- **资源价格库**：451 手册只给消耗量、不含单价，主材/机械/仪表的单价单独维护。
+  Excel 导入（类型/名称/规格/单位/单价/来源，列可配置且可按表头自动认列），
+  按 `类型+名称+规格+单位` upsert，重复导同一份清单不会翻倍；
+  套价时按「精确 → 同单位 → 裸名（忽略括号型号）→ 忽略单位」四级匹配，**单位不一致不会乱套**。
+- **套价**：可对整个工程（`覆盖全部` / `只补未定价`）或单条子目执行，一步 ⌘Z 可撤销。
+- **分组小计**：工具条「分组」切换 按分册 / 按章 / 不分组，清单里插入分组标题行与小计行，
+  同一口径也用于明细表（Excel/PDF 里小计行加重显示）。
+- **定额换算**：预设（山区·高海拔、夜间、洞内…）+ 任意系数，换算只改 `tech_workday / labor_workday`
+  与资源的 `qty_override`，**定额原值留在 `*_base` / `qty_per_unit` 里**，痕迹写进 `conv_note`，随时可还原。
+- **撤销/重做**：自己的 `History` 栈（不用 `UndoManager`，避免 SwiftUI 生命周期里菜单 enable 闪断），
+  一步 = 一次用户操作（改一次工程量 / 删一条子目 / 导一次 Excel），⌘Z、⇧⌘Z 走系统菜单。
 
 ---
 
@@ -175,6 +194,9 @@ ComBudget/
 ./.build/combudget-cli --verify-data                  # 定额库体检
 ./.build/combudget-cli --make-demo <db 路径>          # 生成示例工程
 ```
+
+自检 9 组共 77 项：定额库 / 工程与子目 / Excel 批量导入 / 自动计算 / 报表导出 /
+**价格库与套价** / **定额换算与分组小计** / **撤销·重做** / `.combudget` 工程包。
 
 ### 6.2 打包 .app
 
@@ -216,8 +238,13 @@ unzip -o ./dist/ComBudget-macos-arm64.zip && open ComBudget.app
 | 9 | M 芯片原生、上百行导入不卡 | ✅ 单事务批量写入；表格 LazyVStack |
 | 10 | 不联网、不登录、不做 Windows | ✅ |
 
-**待办**：主材/机械/仪表价格库（批量填价 → 主材费自动成型）；撤销/重做；
-按章节分组小计；定额换算向导；补充册章节号 `T5G*` 的册名映射（数据里有，界面按 series 展示）。
+| 11 | 资源价格库 + Excel 导入 + 自动套价 | ✅（upsert 不翻倍、四级匹配、可撤销） |
+| 12 | 撤销 / 重做 ⌘Z | ✅ 自建 History 栈，覆盖增删改/导入/套价/换算 |
+| 13 | 按分册 / 按章分组小计 | ✅ 清单 + 明细表（Excel/PDF）同一口径 |
+| 14 | 定额换算向导 | ✅ 预设 + 自定义系数，保留原值、留痕迹、可还原 |
+
+**待办**：补充册章节号 `T5G*` 的册名映射（数据里有，界面按 series 展示）；
+换算预设的系数值是「工程常用参考模板」，非 451 号文强制规定，需按招标文件或定额站解释核定。
 
 ---
 

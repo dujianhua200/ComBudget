@@ -11,6 +11,8 @@ final class AppDatabase {
     let quota: QuotaStore
     let project: ProjectStore
     let fee: FeeStore
+    /// 价格库（451 手册只有消耗量，单价存在这里）
+    let price: PriceStore
     /// 内置定额是否成功导入（界面上提示用）
     private(set) var seedStatus: String = ""
 
@@ -20,6 +22,9 @@ final class AppDatabase {
         quota = QuotaStore(db: db)
         project = ProjectStore(db: db)
         fee = FeeStore(db: db)
+        price = PriceStore(db: db)
+        // 装配后，插入子目会自动套价（价格库为空时不改变原有行为）
+        project.price = price
 
         if importSeed {
             let count = try quota.count()
@@ -95,7 +100,26 @@ enum ProjectBundle {
         }
         guard !projects.isEmpty else { return [] }
 
-        // 包里带的定额（换机器时补齐）
+        var newIDs: [Int64] = []
+        try db.transaction {
+            // 包里带的价格库一并收下（换机器后仍能重新套价）
+            let priceRows = try pkg.query("""
+            SELECT kind, name, spec, unit, unit_price, source FROM resource_price;
+            """, []) { r in
+                (r.text(0), r.text(1), r.text(2), r.text(3), r.double(4), r.text(5))
+            }
+            for pr in priceRows {
+                let exists = try db.query(
+                    "SELECT 1 FROM resource_price WHERE kind=? AND name=? AND spec=? AND unit=?;",
+                    [pr.0, pr.1, pr.2, pr.3]) { _ in true }
+                guard exists.isEmpty else { continue }
+                try db.run("""
+                INSERT INTO resource_price(kind, name, spec, unit, unit_price, source, updated_at)
+                VALUES(?,?,?,?,?,?,?);
+                """, [pr.0, pr.1, pr.2, pr.3, pr.4, pr.5, Date()])
+            }
+
+            // 包里带的定额（换机器时补齐）
         let pkgQuotas = try pkg.query("""
         SELECT id, code, name, unit, chapter, section, series, book, work,
                tech_workday, labor_workday, is_builtin FROM quota_item;
@@ -106,8 +130,6 @@ enum ProjectBundle {
                       techWorkday: r.double(9), laborWorkday: r.double(10),
                       isBuiltin: r.bool(11))
         }
-        var newIDs: [Int64] = []
-        try db.transaction {
             for q in pkgQuotas {
                 let exists = try db.query("SELECT 1 FROM quota_item WHERE code=?;", [q.code]) { _ in true }
                 guard exists.isEmpty else { continue }
@@ -174,21 +196,27 @@ enum ProjectBundle {
 
                 let items = try pkg.query("""
                 SELECT id, sort_index, quota_code, quota_name, unit, quantity, workday_coeff,
-                       tech_workday, labor_workday, tech_price, labor_price, note, is_supplement
+                       tech_workday, labor_workday, tech_price, labor_price, note, is_supplement,
+                       COALESCE(chapter,''), COALESCE(series,''),
+                       COALESCE(tech_workday_base, tech_workday),
+                       COALESCE(labor_workday_base, labor_workday), COALESCE(conv_note,'')
                 FROM project_item WHERE project_id=? ORDER BY sort_index;
                 """, [p.id]) { r in
                     (r.int(0), r.int(1), r.text(2), r.text(3), r.text(4), r.double(5),
                      r.double(6), r.double(7), r.double(8), r.double(9), r.double(10),
-                     r.text(11), r.bool(12))
+                     r.text(11), r.bool(12), r.text(13), r.text(14), r.double(15),
+                     r.double(16), r.text(17))
                 }
                 for it in items {
                     try db.run("""
                     INSERT INTO project_item(project_id, sort_index, quota_code, quota_name, unit,
                                              quantity, workday_coeff, tech_workday, labor_workday,
-                                             tech_price, labor_price, note, is_supplement)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);
+                                             tech_price, labor_price, note, is_supplement,
+                                             chapter, series, tech_workday_base, labor_workday_base,
+                                             conv_note)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """, [newPID, it.1, it.2, it.3, it.4, it.5, it.6, it.7, it.8, it.9, it.10,
-                          it.11, it.12])
+                          it.11, it.12, it.13, it.14, it.15, it.16, it.17])
                     let newItemID = db.lastInsertRowID
                     let res = try pkg.query("""
                     SELECT kind, name, spec, unit, qty_per_unit, qty_override, unit_price, is_extra

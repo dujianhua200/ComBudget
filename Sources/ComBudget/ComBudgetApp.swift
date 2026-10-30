@@ -24,6 +24,15 @@ struct ComBudgetApp: App {
                 Button("打印报表…") { app.printReports() }
                     .keyboardShortcut("p", modifiers: .command)
             }
+            // 撤销/重做走自己的 History 栈（⌘Z / ⇧⌘Z），标题显示具体动作名
+            CommandGroup(replacing: .undoRedo) {
+                Button(app.undoTitle) { app.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!app.canUndo)
+                Button(app.redoTitle) { app.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!app.canRedo)
+            }
             CommandGroup(after: .importExport) {
                 Button("导入工程（.combudget）…") {
                     for url in FilePanels.open(ext: ProjectBundle.fileExtension, multiple: true) {
